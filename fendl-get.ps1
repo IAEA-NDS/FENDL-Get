@@ -451,6 +451,15 @@ if (-not $commit) {
 }
 
 function Initialize-Annex([string]$Repo) {
+    # git-annex records its state in commits, which fail without a git
+    # identity. Many users of this script never commit anything, so set a
+    # placeholder in this clone only (an identity configured by the user,
+    # globally or via environment variables, takes precedence).
+    if (-not (Invoke-GitQuiet @('-C', $Repo, 'var', 'GIT_COMMITTER_IDENT')) -or
+        -not (Invoke-GitQuiet @('-C', $Repo, 'var', 'GIT_AUTHOR_IDENT'))) {
+        Invoke-GitQuiet @('-C', $Repo, 'config', 'user.name', 'fendl-get') | Out-Null
+        Invoke-GitQuiet @('-C', $Repo, 'config', 'user.email', 'fendl-get@localhost') | Out-Null
+    }
     if (-not (Get-GitConfig $Repo 'annex.uuid')) {
         # GitHub cannot serve annexed content; skip probing origin for it.
         Invoke-GitQuiet @('-C', $Repo, 'config', 'remote.origin.annex-ignore', 'true') | Out-Null

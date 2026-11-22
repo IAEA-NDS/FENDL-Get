@@ -380,6 +380,15 @@ else
 fi
 
 annex_init() {  # annex_init: initialise git-annex in the current repo once
+    # git-annex records its state in commits, which fail without a git
+    # identity. Many users of this script never commit anything, so set a
+    # placeholder in this clone only (an identity configured by the user,
+    # globally or via environment variables, takes precedence).
+    if ! git var GIT_COMMITTER_IDENT >/dev/null 2>&1 ||
+       ! git var GIT_AUTHOR_IDENT >/dev/null 2>&1; then
+        git config user.name "fendl-get"
+        git config user.email "fendl-get@localhost"
+    fi
     if [ -z "$(git config --get annex.uuid 2>/dev/null || true)" ]; then
         # GitHub cannot serve annexed content; skip probing origin for it.
         git config remote.origin.annex-ignore true
