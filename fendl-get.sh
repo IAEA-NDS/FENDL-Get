@@ -4,10 +4,12 @@
 #                 (FENDL) from https://github.com/iaea-nds/fendl-processed
 #
 # The repository stores large files with git-annex. This script
-#   1. installs git-annex into an isolated Python venv (via pip),
-#   2. clones the repository (and the fendl-endf submodule if needed),
+#   1. clones the repository (and the fendl-endf submodule if needed),
+#   2. installs git-annex into a Python venv inside the clone (via pip),
 #   3. checks out the requested FENDL release, and
 #   4. downloads the requested file types with `git annex get`.
+# Everything it creates is inside the clone (and the --copy-to directory, if
+# given); see --help for how to remove it again.
 #
 # Requirements: bash (3.2+, so the macOS default works), git, python3.
 # Run `fendl-get.sh --help` for usage.
@@ -35,8 +37,18 @@ RELEASE="$DEFAULT_RELEASE"   # 'latest' = newest FENDL-* tag
 TYPES=""
 PARTICLES=""
 JOBS=4
-VENV="${FENDL_GET_VENV:-${XDG_DATA_HOME:-$HOME/.local/share}/fendl-get/venv}"
-PIP_SPEC="${FENDL_GET_PIP_SPEC:-git-annex}"
+VENV="${FENDL_GET_VENV:-}"   # empty: <clone>/.git/fendl-get-venv
+VENV_SUBDIR="fendl-get-venv"
+# Pinned versions (tested in CI). FENDL_GET_PIP_SPEC overrides the git-annex
+# requirement, e.g. FENDL_GET_PIP_SPEC=git-annex for the newest release.
+PIP_SPEC="${FENDL_GET_PIP_SPEC:-git-annex==10.20261026}"
+# pip >= 26.1 needs Python >= 3.10; the macOS Command Line Tools have 3.9.
+PIP_PIN_NEW='pip==26.3; python_version >= "3.10"'
+PIP_PIN_OLD='pip==26.0.1; python_version < "3.10"'
+MAX_JOBS=64
+# Root commits of the data branches, used to recognise existing clones.
+ROOT_COMMIT_MAIN="705c960547e89788261fe9bfcf0b12602f6db072"
+ROOT_COMMIT_ENDF="5b1d5b8cb48bb0c3e237850dbec163333dc921a9"
 PYTHON="${PYTHON:-}"
 USE_SYSTEM_ANNEX=0
 DRY_RUN=0
@@ -86,7 +98,8 @@ Release and location:
                         tag. Default: $DEFAULT_RELEASE.
       --list-releases   Show available releases and exit.
   -d, --dir DIR         Where to clone the repository (default: ./fendl-processed).
-                        An existing clone is reused.
+                        An existing clone of fendl-processed is reused; any
+                        other existing, non-empty directory is refused.
   -u, --update          Fetch the newest commits/tags of an existing clone.
 
 Actions:
@@ -96,11 +109,12 @@ Actions:
   -c, --copy-to DIR     After downloading, also copy the selected files as
                         regular files (not symlinks) into DIR, keeping the
                         directory structure.
-  -j, --jobs N          Number of parallel downloads (default: $JOBS).
+  -j, --jobs N          Number of parallel downloads, 1-$MAX_JOBS (default: $JOBS).
 
 git-annex installation:
-      --venv DIR        Location of the Python venv with git-annex
-                        (default: $VENV).
+      --venv DIR        Location of the Python venv with git-annex (default:
+                        inside the clone, in .git/$VENV_SUBDIR). DIR must not
+                        exist yet, be empty, or be a venv made by this script.
       --system-annex    Use the git-annex found on PATH instead of a venv.
 
   -h, --help            Show this help.
@@ -121,6 +135,11 @@ Examples:
 
   # Get neutron ACE files as plain files in ./ace-lib
   $(basename "$0") -t ace -p n --copy-to ./ace-lib
+
+Everything this script creates (repository, venv with git-annex, downloaded
+files) is inside the clone directory, plus the --copy-to directory if given.
+Downloaded files are write-protected by git-annex, so remove the clone with
+  chmod -R u+w fendl-processed && rm -rf fendl-processed
 
 Files are downloaded anonymously from public Amazon S3 buckets (and, for older
 releases, from the IAEA-NDS web server). Please note the terms of
@@ -168,11 +187,12 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-case "$JOBS" in ''|*[!0-9]*) die "--jobs expects a positive integer" ;; esac
-[ "$JOBS" -ge 1 ] || die "--jobs expects a positive integer"
+case "$JOBS" in ''|*[!0-9]*) die "--jobs expects an integer from 1 to $MAX_JOBS" ;; esac
+{ [ "$JOBS" -ge 1 ] && [ "$JOBS" -le $MAX_JOBS ]; } || die "--jobs expects an integer from 1 to $MAX_JOBS"
 [ $DROP -eq 1 ] && [ -n "$COPY_TO" ] && die "--drop and --copy-to cannot be combined"
-# The script changes into the clone later, so make --copy-to absolute now.
+# The script changes into the clone later, so make paths absolute now.
 case "$COPY_TO" in ''|/*) ;; *) COPY_TO="$(pwd -P)/$COPY_TO" ;; esac
+case "$VENV" in ''|/*) ;; *) VENV="$(pwd -P)/$VENV" ;; esac
 
 # Normalise type list.
 sel_types=""
@@ -278,49 +298,57 @@ find_python() {
     die "python3 is not installed"
 }
 
+VENV_MARKER=".fendl-get-venv"   # marks venvs created by this script
+
 setup_venv() {
-    if [ -x "$VENV/bin/git-annex" ] && "$VENV/bin/git-annex" version >/dev/null 2>&1; then
+    # Only use a directory that does not exist yet, is empty, or is a venv
+    # created by this script: never put files into, or delete, anything else.
+    if [ -e "$VENV" ] || [ -L "$VENV" ]; then
+        [ -d "$VENV" ] && [ ! -L "$VENV" ] || die "$VENV exists and is not a directory; choose another --venv"
+        if [ ! -f "$VENV/$VENV_MARKER" ] && [ -n "$(ls -A "$VENV" 2>/dev/null)" ]; then
+            die "$VENV is not empty and was not created by this script; refusing to use it (choose another --venv)"
+        fi
+    fi
+    if [ -f "$VENV/$VENV_MARKER" ] && [ -x "$VENV/bin/git-annex" ] &&
+       "$VENV/bin/git-annex" version >/dev/null 2>&1; then
         return 0
     fi
     find_python
     if [ ! -x "$VENV/bin/python" ]; then
+        local created=0
+        [ -e "$VENV" ] || created=1
         msg "Creating Python venv in $VENV"
-        mkdir -p "$(dirname "$VENV")"
         if ! "$PYTHON" -m venv "$VENV"; then
-            rm -rf "$VENV"
+            # Clean up only what this script created itself.
+            [ $created -eq 1 ] && rm -rf -- "$VENV"
             warn "could not create a venv (on Debian/Ubuntu: sudo apt install python3-venv)"
             return 1
         fi
+        : > "$VENV/$VENV_MARKER"
     fi
     # The pip bundled with older Pythons (e.g. Python 3.9 of the macOS
     # Command Line Tools) may not recognise the platform tags of the
-    # git-annex wheels (macosx_15_0, manylinux_2_34), so upgrade it first.
-    msg "Upgrading pip in the venv"
-    "$VENV/bin/python" -m pip install --quiet --disable-pip-version-check --upgrade pip ||
-        warn "could not upgrade pip; trying with the existing version"
+    # git-annex wheels (macosx_15_0, manylinux_2_34), so update it first.
+    # --no-cache-dir: leave no pip cache behind in the user's home directory.
+    msg "Updating pip in the venv"
+    "$VENV/bin/python" -m pip install --quiet --no-cache-dir --disable-pip-version-check \
+        "$PIP_PIN_NEW" "$PIP_PIN_OLD" ||
+        warn "could not update pip; trying with the existing version"
     msg "Installing git-annex into the venv (pip install $PIP_SPEC)"
-    if ! "$VENV/bin/python" -m pip install --quiet --disable-pip-version-check "$PIP_SPEC"; then
+    if ! "$VENV/bin/python" -m pip install --quiet --no-cache-dir --disable-pip-version-check "$PIP_SPEC"; then
         return 1
     fi
     "$VENV/bin/git-annex" version >/dev/null 2>&1
 }
 
-if [ $USE_SYSTEM_ANNEX -eq 1 ]; then
-    command -v git-annex >/dev/null 2>&1 || { annex_hint; die "git-annex not found on PATH"; }
-elif setup_venv; then
-    PATH="$VENV/bin:$PATH"   # makes `git annex` find the venv binary
-    export PATH
-elif command -v git-annex >/dev/null 2>&1; then
-    warn "pip install of git-annex failed; falling back to $(command -v git-annex)"
-else
-    annex_hint
-    die "git-annex is not available"
-fi
-msg "Using $(git annex version 2>/dev/null | head -n 1) ($(command -v git-annex))"
 
 # ---------------------------------------------------------------- repository
 if [ -d "$DIR/.git" ] || [ -f "$DIR/.git" ]; then
     git -C "$DIR" rev-parse --git-dir >/dev/null 2>&1 || die "$DIR is not a valid git repository"
+    # Never modify a repository that is not a clone of fendl-processed
+    # (e.g. a project of the user given by mistake as --dir).
+    git -C "$DIR" cat-file -e "$ROOT_COMMIT_MAIN^{commit}" 2>/dev/null ||
+        die "$DIR is a git repository, but not a clone of fendl-processed; refusing to modify it (choose another --dir)"
     msg "Using existing clone in $DIR"
     if [ $UPDATE -eq 1 ]; then
         msg "Fetching updates"
@@ -335,6 +363,14 @@ fi
 cd "$DIR"
 ROOT=$(pwd -P)
 
+# Copies inside the clone would end up as stray files in the repository.
+if [ -n "$COPY_TO" ]; then
+    [ -d "$COPY_TO" ] && COPY_TO=$(cd "$COPY_TO" && pwd -P)
+    case "$COPY_TO/" in
+        "$ROOT"/*) die "--copy-to must be a directory outside the clone ($ROOT)" ;;
+    esac
+fi
+
 latest_release() {
     git tag -l 'FENDL-*' --sort=-creatordate | head -n 1
 }
@@ -348,6 +384,23 @@ if [ $LIST_RELEASES -eq 1 ]; then
     git tag -l 'FENDL-*' --sort=-creatordate | sed 's/^/  /'
     exit 0
 fi
+
+# ---------------------------------------------------------------- git-annex
+# By default the venv lives inside the clone, so that removing the clone
+# removes everything this script installed.
+[ -n "$VENV" ] || VENV="$(git rev-parse --absolute-git-dir)/$VENV_SUBDIR"
+if [ $USE_SYSTEM_ANNEX -eq 1 ]; then
+    command -v git-annex >/dev/null 2>&1 || { annex_hint; die "git-annex not found on PATH"; }
+elif setup_venv; then
+    PATH="$VENV/bin:$PATH"   # makes `git annex` find the venv binary
+    export PATH
+elif command -v git-annex >/dev/null 2>&1; then
+    warn "pip install of git-annex failed; falling back to $(command -v git-annex)"
+else
+    annex_hint
+    die "git-annex is not available"
+fi
+msg "Using $(git annex version 2>/dev/null | head -n 1) ($(command -v git-annex))"
 
 if [ "$RELEASE" = latest ]; then
     RELEASE=$(latest_release)
@@ -438,6 +491,8 @@ if [ $need_endf -eq 1 ] || [ -e "$ENDF_ROOT/.git" ]; then
     # Keep the submodule at the commit recorded for this release.
     [ -e "$ENDF_ROOT/.git" ] || msg "Fetching the $ENDF_SUBMODULE submodule (ENDF files)"
     git -c advice.detachedHead=false submodule --quiet update --init -- "$ENDF_SUBMODULE"
+    git -C "$ENDF_ROOT" cat-file -e "$ROOT_COMMIT_ENDF^{commit}" 2>/dev/null ||
+        die "$ENDF_ROOT is not a clone of fendl-endf; refusing to modify it"
     (cd "$ENDF_ROOT" && annex_init && enable_s3_remote "$S3_REMOTE_ENDF")
 fi
 

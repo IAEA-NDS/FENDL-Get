@@ -13,7 +13,8 @@
       TEST_ARGS   extra options for fendl-get.ps1, e.g. -SystemAnnex
       KEEP_WORK   if set to 1, the temporary directory is kept
 
-    Needs network access. Uses a fresh venv unless -SystemAnnex is given.
+    Needs network access. Uses the default venv inside the clone unless
+    -SystemAnnex is given.
 #>
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -28,7 +29,7 @@ $Work = Join-Path ([System.IO.Path]::GetTempPath()) ("fendl-get-test-" + [guid]:
 New-Item -ItemType Directory -Path $Work | Out-Null
 $Clone = Join-Path $Work 'clone'
 $Out = Join-Path $Work 'out'
-$VenvDir = Join-Path $Work 'venv'
+$VenvDir = Join-Path $Clone '.git/fendl-get-venv'   # default location
 $VenvBin = if ($OnWindows) { Join-Path $VenvDir 'Scripts' } else { Join-Path $VenvDir 'bin' }
 $script:Log = ''
 $script:Passed = 0
@@ -51,10 +52,12 @@ function Remove-Work {
 }
 
 # Run fendl-get.ps1 in a separate PowerShell process (as users would).
-function Invoke-FendlGet([string[]]$Arguments) {
+function Invoke-FendlGet([string[]]$Arguments, [switch]$NoDefaults) {
     $a = @('-NoProfile')
     if ($OnWindows) { $a += @('-ExecutionPolicy', 'Bypass') }
-    $a += @('-File', $Script, '-Dir', $Clone, '-Venv', $VenvDir) + $Extra + $Arguments
+    $a += @('-File', $Script)
+    if (-not $NoDefaults) { $a += @('-Dir', $Clone) + $Extra }
+    $a += $Arguments
     $eap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
     try { $script:Log = (& $Shell @a 2>&1 | ForEach-Object { "$_" }) -join "`n" }
     finally { $ErrorActionPreference = $eap }
@@ -106,7 +109,13 @@ function Assert-Log([string]$Pattern, [string]$What) {
     if ($script:Log -notmatch $Pattern) { Fail $What }
 }
 
-# git-annex from the test venv for the checks above (-SystemAnnex: from PATH).
+# Run fendl-get.ps1 expecting it to fail with a message matching a pattern.
+function Assert-Fails([string]$Pattern, [string[]]$Arguments) {
+    if (Invoke-FendlGet $Arguments -NoDefaults) { Fail "accepted: $($Arguments -join ' ')" }
+    Assert-Log $Pattern "unexpected error message for: $($Arguments -join ' ')"
+}
+
+# git-annex from the venv in the clone for the checks above (-SystemAnnex: from PATH).
 $env:PATH = $VenvBin + [System.IO.Path]::PathSeparator + $env:PATH
 
 Write-Host "=== PowerShell used for fendl-get.ps1: $Shell"
@@ -126,6 +135,8 @@ $Expected = @(
 Write-Host '=== 1. argument errors'
 if (Invoke-FendlGet @('-Type', 'bogus')) { Fail 'invalid type accepted' }
 Assert-Log "unknown type 'bogus'" 'no error message for invalid type'
+Assert-Fails 'integer from 1 to 64' @('-Type', 'ace', '-Jobs', '0')
+Assert-Fails 'integer from 1 to 64' @('-Type', 'ace', '-Jobs', '65')
 Pass 'argument handling'
 
 Write-Host '=== 2. dry run (sets up git-annex, clones, enables remotes)'
@@ -138,6 +149,7 @@ Pass 'dry run'
 Write-Host '=== 3. download with -CopyTo'
 if (-not (Invoke-FendlGet ($Sel + @('-CopyTo', $Out)))) { Fail 'download failed' }
 foreach ($f in $Expected) { Test-Content $f (Join-Path $Out $f) }
+if ($Extra.Count -eq 0 -and -not (Test-Path (Join-Path $VenvDir '.fendl-get-venv'))) { Fail 'venv not inside the clone' }
 Pass 'download from S3 and -CopyTo (contents verified)'
 
 Write-Host '=== 4. rerun is a no-op'
@@ -168,6 +180,39 @@ if (-not (Invoke-FendlGet $Sel)) { Fail 'switching back failed' }
 Assert-Log 'to download: 1 files' 'content of the default release lost after switching back'
 foreach ($f in $Expected) { Test-Content $f }
 Pass 'release switching'
+
+Write-Host '=== 8. protection against wrong arguments'
+# -Venv: a non-empty directory not created by the script is refused and left alone.
+$data = Join-Path $Work 'data'
+New-Item -ItemType Directory -Path $data | Out-Null
+Set-Content -LiteralPath (Join-Path $data 'thesis.tex') -Value 'keep'
+Assert-Fails 'refusing to use it' @('-Dir', $Clone, '-Venv', $data, '-Type', 'ace', '-Particle', 'n', '-DryRun')
+if (@(Get-ChildItem -LiteralPath $data -Force).Count -ne 1) { Fail '-Venv directory was modified' }
+# -Dir: another git repository is refused and left unchanged.
+$project = Join-Path $Work 'project'
+& git init -q $project
+& git -C $project -c user.name=t -c user.email=t@t commit -q --allow-empty -m mine
+$cfgBefore = (& git -C $project config --local -l) -join "`n"
+Assert-Fails 'not a clone of fendl-processed' @('-Dir', $project, '-Type', 'ace', '-Particle', 'n', '-DryRun')
+if (Test-Path (Join-Path $project '.git/annex')) { Fail 'git-annex was initialised in another repository' }
+if (((& git -C $project config --local -l) -join "`n") -ne $cfgBefore) { Fail 'config of another repository changed' }
+# -Dir: a non-empty directory that is no repository is refused.
+Assert-Fails 'exists and is not a git repository' @('-Dir', $data, '-Type', 'ace', '-Particle', 'n', '-DryRun')
+# -CopyTo: directories inside the clone are refused.
+Assert-Fails 'outside the clone' @('-Dir', $Clone, '-Type', 'ace', '-Particle', 'n', '-Match', '01H_001', '-CopyTo', $Clone)
+Assert-Fails 'outside the clone' @('-Dir', $Clone, '-Type', 'ace', '-Particle', 'n', '-Match', '01H_001', '-CopyTo', (Join-Path $Clone 'general-purpose'))
+Pass 'protection against wrong arguments'
+
+Write-Host '=== 9. removal as documented'
+if ($OnWindows) {
+    # the command given in the README for Windows
+    Remove-Item -Recurse -Force $Clone
+} else {
+    & chmod -R u+w $Clone
+    Remove-Item -Recurse -Force $Clone
+}
+if (Test-Path $Clone) { Fail 'clone could not be removed with the documented command' }
+Pass 'removal of the clone (including the venv)'
 
 Write-Host "=== all $($script:Passed) checks passed"
 Remove-Work

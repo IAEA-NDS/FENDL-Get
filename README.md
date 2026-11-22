@@ -8,14 +8,18 @@ HDF5 files for OpenMC, verification plots and the ENDF source files.
 The files in [fendl-processed] are stored with [git-annex]. These
 scripts take care of everything needed to get them:
 
-1. they create a Python virtual environment and install `git-annex`
-   into it with `pip`, so nothing is installed system-wide,
-2. clone [fendl-processed] (by default into `./fendl-processed`) and,
-   if ENDF files are requested, the [fendl-endf] repository,
+1. they clone [fendl-processed] (by default into `./fendl-processed`)
+   and, if ENDF files are requested, the [fendl-endf] repository,
+2. create a Python virtual environment inside the clone and install
+   `git-annex` into it with `pip`, so nothing is installed system-wide,
 3. check out the requested FENDL version
    (by default the `fendl32d_prep` branch), and
 4. download the selected files from public storage
    (no account or credentials are needed).
+
+Everything the scripts create is inside the clone folder (plus the
+folder given with `--copy-to`, if any), so it can be removed completely
+by deleting that folder, see [Removing everything](#removing-everything).
 
 There are two equivalent scripts:
 
@@ -102,11 +106,13 @@ A few things to keep in mind:
 - Downloaded files appear in the clone as read-only symbolic links
   into `.git/annex`. If you need regular files, e.g. to move them
   elsewhere, use `--copy-to`.
-- The venv with git-annex is created in `~/.local/share/fendl-get/venv`.
-  If you want to run `git` or `git annex` commands in the clone
-  yourself, put its `git-annex` on your `PATH` first, as indicated at
-  the end of the script output:
-  `export PATH="$HOME/.local/share/fendl-get/venv/bin:$PATH"`.
+- The venv with git-annex (about 110 MB) is created inside the clone,
+  in `fendl-processed/.git/fendl-get-venv`. If you want to run `git` or
+  `git annex` commands in the clone yourself, put its `git-annex` on
+  your `PATH` first, as indicated at the end of the script output, e.g.
+  `export PATH="$PWD/fendl-processed/.git/fendl-get-venv/bin:$PATH"`.
+- `--copy-to` overwrites files with the same names in the target folder,
+  which must be outside the clone.
 - The `git-annex` package on PyPI provides binaries for Linux with
   glibc 2.34 or newer (e.g. Ubuntu 22.04+, Debian 12+, RHEL 9+) and
   for macOS 15 or newer. On other systems, [install git-annex] yourself,
@@ -137,7 +143,7 @@ Run `Get-Help .\fendl-get.ps1 -Detailed` for all options.
 
 Differences from `fendl-get.sh`:
 
-- Windows usually does not support symbolic links, so the files
+- The script does not use symbolic links on Windows, so the files
   appear as regular files in the clone (git-annex "unlocked" mode).
   Files that have not been downloaded yet are small placeholder files.
   Downloaded content is stored twice (in `.git\annex` and in the
@@ -147,12 +153,32 @@ Differences from `fendl-get.sh`:
   `fendl-endf` folder (instead of as a git submodule), because
   git-annex replaces the `.git` file of a submodule by a symbolic
   link, which is usually not possible on Windows.
-- The venv with git-annex is created in `%LOCALAPPDATA%\fendl-get\venv`.
+- The venv with git-annex is created in `fendl-processed\.git\fendl-get-venv`.
 
 If you use the [Windows Subsystem for Linux][WSL], you can also run
 `fendl-get.sh` inside WSL.
 
 [WSL]: https://learn.microsoft.com/windows/wsl/
+
+
+## Removing everything
+
+The scripts do not change any settings or files outside the clone
+folder (and the `--copy-to` folder). To remove everything, including
+the venv with git-annex and all downloaded files, delete the clone
+folder. git-annex write-protects downloaded files, so a plain `rm -rf`
+fails; use instead
+
+- on Linux and macOS:
+  ```
+  chmod -R u+w fendl-processed && rm -rf fendl-processed
+  ```
+- on Windows (PowerShell):
+  ```
+  Remove-Item -Recurse -Force .\fendl-processed
+  ```
+
+To free disk space but keep the clone, use `--drop` (`-Drop`) instead.
 
 
 ## Development
@@ -161,6 +187,13 @@ The scripts hard-code the layout of [fendl-processed] (directories
 and file extensions per file type) and the git-annex special remotes
 holding the files. If a FENDL release changes the layout or the
 storage, both scripts need to be updated.
+
+The versions of `git-annex` and `pip` installed into the venv are
+pinned in both scripts to the versions tested in CI. To try a newer
+git-annex release, set the environment variable
+`FENDL_GET_PIP_SPEC=git-annex` (or e.g. `git-annex==<version>`); the
+weekly CI run does this in a separate job. If it passes, update the
+pins in both scripts.
 
 End-to-end tests clone the repository into a temporary directory,
 download a few small files and verify them against their git-annex
@@ -173,6 +206,9 @@ TEST_ARGS=--system-annex ./tests/test-fendl-get.sh
 pwsh ./tests/test-fendl-get.ps1                # PowerShell script
 $env:TEST_SHELL = 'powershell'; ./tests/test-fendl-get.ps1   # Windows PowerShell 5.1
 ```
-The tests need network access. They run in GitHub Actions on Linux,
-macOS and Windows for every push and weekly, to notice breakage
+The tests need network access. They also check that wrong arguments
+(e.g. an unrelated repository as `--dir`, a non-empty folder as `--venv`)
+are refused without changing anything, and that the clone can be
+removed with the commands given above. They run in GitHub Actions on
+Linux, macOS and Windows for every push and weekly, to notice breakage
 caused by external changes (new git-annex releases, storage, GitHub).

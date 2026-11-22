@@ -10,7 +10,8 @@
 #   TEST_ARGS   extra options for fendl-get.sh, e.g. --system-annex
 #   KEEP_WORK   if set to 1, the temporary directory is kept
 #
-# Needs network access. Uses a fresh venv unless --system-annex is given.
+# Needs network access. Uses the default venv inside the clone unless
+# --system-annex is given.
 
 set -euo pipefail
 
@@ -40,9 +41,16 @@ fail() { echo "FAIL: $*" >&2; echo "--- last output:" >&2; cat "$LOG" >&2; exit 
 
 # Run fendl-get.sh, logging its output to $LOG (and to the console).
 run() {
-    "$BASH_BIN" "$SCRIPT" --dir "$CLONE" --venv "$WORK/venv" \
+    "$BASH_BIN" "$SCRIPT" --dir "$CLONE" \
         ${EXTRA[@]+"${EXTRA[@]}"} "$@" > "$LOG" 2>&1 || { cat "$LOG"; return 1; }
     cat "$LOG"
+}
+
+# Run fendl-get.sh expecting it to fail with a message matching a pattern.
+run_fails() {  # run_fails PATTERN ARGS...
+    local pattern="$1"; shift
+    if "$BASH_BIN" "$SCRIPT" "$@" > "$LOG" 2>&1; then fail "accepted: $*"; fi
+    grep -q -- "$pattern" "$LOG" || fail "unexpected error message for: $*"
 }
 
 sha256_of() {
@@ -87,6 +95,8 @@ echo "=== 1. argument errors"
 if "$BASH_BIN" "$SCRIPT" -t bogus > "$LOG" 2>&1; then fail "invalid type accepted"; fi
 grep -q "unknown type 'bogus'" "$LOG" || fail "no error message for invalid type"
 "$BASH_BIN" "$SCRIPT" --help > "$LOG" 2>&1 || fail "--help failed"
+run_fails 'integer from 1 to 64' -t ace -j 0
+run_fails 'integer from 1 to 64' -t ace -j 65
 pass "argument handling"
 
 echo "=== 2. dry run (sets up git-annex, clones, enables remotes)"
@@ -101,6 +111,9 @@ pass "dry run"
 echo "=== 3. download with --copy-to"
 run "${SEL[@]}" --copy-to "$OUT" || fail "download failed"
 for f in $EXPECTED; do check_content "$f" "$OUT/$f"; done
+if [ ${#EXTRA[@]} -eq 0 ]; then
+    [ -f "$CLONE/.git/fendl-get-venv/.fendl-get-venv" ] || fail "venv not inside the clone"
+fi
 pass "download from S3 and --copy-to (contents verified)"
 
 echo "=== 4. rerun is a no-op"
@@ -119,5 +132,41 @@ echo "=== 6. drop"
 run -t ace -p n -m '01H_001' --drop || fail "drop failed"
 [ ! -f "$CLONE/general-purpose/neutron/ace/01H_001" ] || fail "file still present after drop"
 pass "drop"
+
+echo "=== 7. protection against wrong arguments"
+# --venv: a non-empty directory not created by the script is refused and
+# left alone, also as a relative path.
+mkdir -p "$WORK/data" && echo keep > "$WORK/data/thesis.tex"
+run_fails 'refusing to use it' --dir "$CLONE" --venv "$WORK/data" -t ace -p n -n
+(cd "$WORK" && run_fails '/data is not empty' --dir "$CLONE" --venv data -t ace -p n -n)
+[ "$(ls -A "$WORK/data")" = thesis.tex ] || fail "--venv directory was modified"
+# --venv: if creating the venv fails, only a directory created by the
+# script is removed, and an existing empty directory is kept. (PYTHON=false
+# makes venv creation fail; the script may then fall back to a system
+# git-annex, so only the state of the directories is checked.)
+PYTHON=false "$BASH_BIN" "$SCRIPT" --dir "$CLONE" --venv "$WORK/newvenv" -t ace -p n -n > "$LOG" 2>&1 || true
+grep -q 'could not create a venv' "$LOG" || fail "venv creation did not fail as intended"
+[ ! -e "$WORK/newvenv" ] || fail "venv directory created by the script not cleaned up"
+mkdir "$WORK/emptyvenv"
+PYTHON=false "$BASH_BIN" "$SCRIPT" --dir "$CLONE" --venv "$WORK/emptyvenv" -t ace -p n -n > "$LOG" 2>&1 || true
+[ -d "$WORK/emptyvenv" ] || fail "existing (empty) --venv directory was removed"
+# --dir: another git repository is refused and left unchanged.
+git init -q "$WORK/project"
+git -C "$WORK/project" -c user.name=t -c user.email=t@t commit -q --allow-empty -m mine
+cfg_before=$(git -C "$WORK/project" config --local -l)
+run_fails 'not a clone of fendl-processed' --dir "$WORK/project" -t ace -p n -n
+[ ! -e "$WORK/project/.git/annex" ] || fail "git-annex was initialised in another repository"
+[ "$(git -C "$WORK/project" config --local -l)" = "$cfg_before" ] || fail "config of another repository changed"
+# --dir: a non-empty directory that is no repository is refused.
+run_fails 'exists and is not a git repository' --dir "$WORK/data" -t ace -p n -n
+# --copy-to: directories inside the clone are refused.
+run_fails 'outside the clone' --dir "$CLONE" -t ace -p n -m 01H_001 --copy-to "$CLONE"
+run_fails 'outside the clone' --dir "$CLONE" -t ace -p n -m 01H_001 --copy-to "$CLONE/general-purpose"
+pass "protection against wrong arguments"
+
+echo "=== 8. removal as documented"
+chmod -R u+w "$CLONE" && rm -rf "$CLONE"
+[ ! -e "$CLONE" ] || fail "clone could not be removed with the documented command"
+pass "removal of the clone (including the venv)"
 
 echo "=== all $n_pass checks passed"

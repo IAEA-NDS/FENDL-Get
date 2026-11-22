@@ -54,7 +54,8 @@
 
 .PARAMETER Dir
     Where to clone the repository (default: .\fendl-processed). An existing
-    clone created by this script is reused.
+    clone of fendl-processed is reused; any other existing, non-empty
+    directory is refused.
 
 .PARAMETER Update
     Fetch the newest commits/tags of an existing clone.
@@ -70,16 +71,17 @@
     downloaded again at any time).
 
 .PARAMETER CopyTo
-    After downloading, also copy the selected files into this directory,
-    keeping the directory structure.
+    After downloading, also copy the selected files into this directory
+    (outside the clone), keeping the directory structure. Existing files with
+    the same names are overwritten.
 
 .PARAMETER Jobs
-    Number of parallel downloads (default: 4).
+    Number of parallel downloads, 1-64 (default: 4).
 
 .PARAMETER Venv
-    Location of the Python venv with git-annex
-    (default: %LOCALAPPDATA%\fendl-get\venv on Windows,
-    ~/.local/share/fendl-get/venv elsewhere).
+    Location of the Python venv with git-annex (default: inside the clone,
+    in .git\fendl-get-venv). The directory must not exist yet, be empty, or
+    be a venv created by this script.
 
 .PARAMETER SystemAnnex
     Use the git-annex found on PATH instead of a venv.
@@ -104,6 +106,10 @@
 .NOTES
     If script execution is disabled on your system, run the script with
       powershell -ExecutionPolicy Bypass -File .\fendl-get.ps1 ...
+    Everything the script creates (repository, venv with git-annex,
+    downloaded files) is inside the clone directory, plus the -CopyTo
+    directory if given. To remove it again, e.g.:
+      Remove-Item -Recurse -Force .\fendl-processed
     Files are downloaded anonymously from public Amazon S3 buckets (and, for
     older releases, from the IAEA-NDS web server). Please note the terms of
     use in TERMS_OF_USE.md of the repository.
@@ -138,7 +144,17 @@ $RepoUrl = 'https://github.com/iaea-nds/fendl-processed'
 $EndfSubdir = 'fendl-endf'
 $DefaultRelease = 'fendl32d_prep'
 $LocalBranchPrefix = 'fendl-get/'
-$PipSpec = if ($env:FENDL_GET_PIP_SPEC) { $env:FENDL_GET_PIP_SPEC } else { 'git-annex' }
+# Pinned versions (tested in CI). FENDL_GET_PIP_SPEC overrides the git-annex
+# requirement, e.g. FENDL_GET_PIP_SPEC=git-annex for the newest release.
+$PipSpec = if ($env:FENDL_GET_PIP_SPEC) { $env:FENDL_GET_PIP_SPEC } else { 'git-annex==10.20261026' }
+# pip >= 26.1 needs Python >= 3.10.
+$PipPins = @('pip==26.3; python_version >= "3.10"', 'pip==26.0.1; python_version < "3.10"')
+$MaxJobs = 64
+$VenvSubdir = 'fendl-get-venv'
+$VenvMarker = '.fendl-get-venv'   # marks venvs created by this script
+# Root commits of the data branches, used to recognise existing clones.
+$RootCommitMain = '705c960547e89788261fe9bfcf0b12602f6db072'
+$RootCommitEndf = '5b1d5b8cb48bb0c3e237850dbec163333dc921a9'
 
 # Public S3 special remotes, addressed by UUID because the name
 # fendl-proc-aws-s3 is registered twice in fendl-processed.
@@ -226,9 +242,10 @@ function Split-List([string[]]$Items, [switch]$KeepCase) {
 }
 
 # ---------------------------------------------------------------- arguments
-if ($Jobs -lt 1) { Fail '-Jobs expects a positive integer' }
+if ($Jobs -lt 1 -or $Jobs -gt $MaxJobs) { Fail "-Jobs expects an integer from 1 to $MaxJobs" }
 if ($Drop -and $CopyTo) { Fail '-Drop and -CopyTo cannot be combined' }
 if ($CopyTo) { $CopyTo = Resolve-FullPath $CopyTo }
+if ($Venv) { $Venv = Resolve-FullPath $Venv }
 if ($Release -eq '') { $Release = $DefaultRelease }
 $Match = Split-List $Match -KeepCase
 $Path = Split-List $Path -KeepCase
@@ -342,58 +359,48 @@ function Find-Python {
     return $null
 }
 
-if (-not $Venv) {
-    if ($OnWindows) { $Venv = Join-Path $env:LOCALAPPDATA 'fendl-get\venv' }
-    else {
-        $dataHome = if ($env:XDG_DATA_HOME) { $env:XDG_DATA_HOME } else { Join-Path $HOME '.local/share' }
-        $Venv = Join-Path $dataHome 'fendl-get/venv'
-    }
-}
-$VenvBin = if ($OnWindows) { Join-Path $Venv 'Scripts' } else { Join-Path $Venv 'bin' }
-$VenvPython = if ($OnWindows) { Join-Path $VenvBin 'python.exe' } else { Join-Path $VenvBin 'python' }
-$VenvAnnex = if ($OnWindows) { Join-Path $VenvBin 'git-annex.exe' } else { Join-Path $VenvBin 'git-annex' }
 
 function Install-VenvAnnex {
-    if ((Test-Path $VenvAnnex) -and (Invoke-Native $VenvAnnex @('version') -Quiet)) { return $true }
-    if (-not (Test-Path $VenvPython)) {
+    # Only use a directory that does not exist yet, is empty, or is a venv
+    # created by this script: never put files into, or delete, anything else.
+    $marker = Join-Path $Venv $VenvMarker
+    if (Test-Path -LiteralPath $Venv) {
+        $item = Get-Item -LiteralPath $Venv -Force
+        if (-not $item.PSIsContainer -or $item.LinkType) { Fail "$Venv exists and is not a directory; choose another -Venv" }
+        if (-not (Test-Path -LiteralPath $marker) -and @(Get-ChildItem -LiteralPath $Venv -Force).Count -gt 0) {
+            Fail "$Venv is not empty and was not created by this script; refusing to use it (choose another -Venv)"
+        }
+    }
+    if ((Test-Path -LiteralPath $marker) -and (Test-Path -LiteralPath $VenvAnnex) -and
+        (Invoke-Native $VenvAnnex @('version') -Quiet)) { return $true }
+    if (-not (Test-Path -LiteralPath $VenvPython)) {
         $py = Find-Python
         if ($null -eq $py) { Write-Warn 'Python 3 not found (https://www.python.org/downloads/)'; return $false }
+        $created = -not (Test-Path -LiteralPath $Venv)
         Write-Msg "Creating Python venv in $Venv"
-        New-Item -ItemType Directory -Force -Path (Split-Path $Venv -Parent) | Out-Null
         $rest = @()
         if ($py.Count -gt 1) { $rest = $py[1..($py.Count - 1)] }
         if (-not (Invoke-Native $py[0] ($rest + @('-m', 'venv', $Venv)))) {
-            Remove-Item -Recurse -Force $Venv -ErrorAction SilentlyContinue
+            # Clean up only what this script created itself.
+            if ($created) { Remove-Item -LiteralPath $Venv -Recurse -Force -ErrorAction SilentlyContinue }
             Write-Warn 'could not create a Python venv'
             return $false
         }
+        New-Item -ItemType File -Path $marker -Force | Out-Null
     }
     # Old bundled pip versions may not know the platform tags of the wheels.
-    Write-Msg 'Upgrading pip in the venv'
-    if (-not (Invoke-Native $VenvPython @('-m', 'pip', 'install', '--quiet', '--disable-pip-version-check', '--upgrade', 'pip'))) {
-        Write-Warn 'could not upgrade pip; trying with the existing version'
+    # --no-cache-dir: leave no pip cache behind in the user's profile.
+    Write-Msg 'Updating pip in the venv'
+    if (-not (Invoke-Native $VenvPython (@('-m', 'pip', 'install', '--quiet', '--no-cache-dir', '--disable-pip-version-check') + $PipPins))) {
+        Write-Warn 'could not update pip; trying with the existing version'
     }
     Write-Msg "Installing git-annex into the venv (pip install $PipSpec)"
-    if (-not (Invoke-Native $VenvPython @('-m', 'pip', 'install', '--quiet', '--disable-pip-version-check', $PipSpec))) {
+    if (-not (Invoke-Native $VenvPython @('-m', 'pip', 'install', '--quiet', '--no-cache-dir', '--disable-pip-version-check', $PipSpec))) {
         return $false
     }
     return (Invoke-Native $VenvAnnex @('version') -Quiet)
 }
 
-$origPath = $env:PATH
-if ($SystemAnnex) {
-    if (-not (Get-Command git-annex -ErrorAction SilentlyContinue)) { Show-AnnexHint; Fail 'git-annex not found on PATH' }
-} elseif (Install-VenvAnnex) {
-    $env:PATH = $VenvBin + [System.IO.Path]::PathSeparator + $env:PATH   # lets `git annex` find it
-} elseif (Get-Command git-annex -ErrorAction SilentlyContinue) {
-    Write-Warn "pip install of git-annex failed; falling back to $((Get-Command git-annex).Source)"
-} else {
-    Show-AnnexHint
-    Fail 'git-annex is not available'
-}
-$annexVersion = (Get-GitOutput @('annex', 'version', '--raw'))
-if ($annexVersion.Count -eq 0) { $annexVersion = @('?') }
-Write-Msg "Using git-annex $($annexVersion[0]) ($((Get-Command git-annex).Source))"
 
 # ---------------------------------------------------------------- repository
 $Root = Resolve-FullPath $Dir
@@ -401,7 +408,25 @@ $EndfRoot = Join-Path $Root $EndfSubdir
 
 function Test-GitRepo([string]$d) { return (Test-Path (Join-Path $d '.git')) }
 
+# Never modify a repository that is not a clone of the expected one (e.g. a
+# project of the user given by mistake as -Dir).
+function Assert-CloneOf([string]$Repo, [string]$RootCommit, [string]$What) {
+    if (-not (Invoke-GitQuiet @('-C', $Repo, 'cat-file', '-e', "$RootCommit^{commit}"))) {
+        Fail "$Repo is a git repository, but not a clone of $What; refusing to modify it (choose another -Dir)"
+    }
+}
+
+# Copies inside the clone would end up as stray files in the repository.
+if ($CopyTo) {
+    $cmp = if ($OnWindows) { [System.StringComparison]::OrdinalIgnoreCase } else { [System.StringComparison]::Ordinal }
+    $sep = [string][System.IO.Path]::DirectorySeparatorChar
+    if (($CopyTo.TrimEnd($sep) + $sep).StartsWith($Root.TrimEnd($sep) + $sep, $cmp)) {
+        Fail "-CopyTo must be a directory outside the clone ($Root)"
+    }
+}
+
 if (Test-GitRepo $Root) {
+    Assert-CloneOf $Root $RootCommitMain 'fendl-processed'
     Write-Msg "Using existing clone in $Root"
     if ($Update) {
         Write-Msg 'Fetching updates'
@@ -434,6 +459,32 @@ if ($ListReleases) {
     (Get-GitOutput @('-C', $Root, 'tag', '-l', 'FENDL-*', '--sort=-creatordate')) | ForEach-Object { Write-Host "  $_" }
     exit 0
 }
+
+# ---------------------------------------------------------------- git-annex
+# By default the venv lives inside the clone, so that removing the clone
+# removes everything this script installed.
+if (-not $Venv) {
+    $gitDir = Get-GitOutput @('-C', $Root, 'rev-parse', '--absolute-git-dir')
+    if ($gitDir.Count -eq 0) { Fail "cannot determine the .git directory of $Root" }
+    $Venv = Join-Path ([string]$gitDir[0]) $VenvSubdir
+}
+$VenvBin = if ($OnWindows) { Join-Path $Venv 'Scripts' } else { Join-Path $Venv 'bin' }
+$VenvPython = if ($OnWindows) { Join-Path $VenvBin 'python.exe' } else { Join-Path $VenvBin 'python' }
+$VenvAnnex = if ($OnWindows) { Join-Path $VenvBin 'git-annex.exe' } else { Join-Path $VenvBin 'git-annex' }
+$origPath = $env:PATH
+if ($SystemAnnex) {
+    if (-not (Get-Command git-annex -ErrorAction SilentlyContinue)) { Show-AnnexHint; Fail 'git-annex not found on PATH' }
+} elseif (Install-VenvAnnex) {
+    $env:PATH = $VenvBin + [System.IO.Path]::PathSeparator + $env:PATH   # lets `git annex` find it
+} elseif (Get-Command git-annex -ErrorAction SilentlyContinue) {
+    Write-Warn "pip install of git-annex failed; falling back to $((Get-Command git-annex).Source)"
+} else {
+    Show-AnnexHint
+    Fail 'git-annex is not available'
+}
+$annexVersion = (Get-GitOutput @('annex', 'version', '--raw'))
+if ($annexVersion.Count -eq 0) { $annexVersion = @('?') }
+Write-Msg "Using git-annex $($annexVersion[0]) ($((Get-Command git-annex).Source))"
 
 if ($Release -eq 'latest') {
     $tags = Get-GitOutput @('-C', $Root, 'tag', '-l', 'FENDL-*', '--sort=-creatordate')
@@ -553,6 +604,7 @@ if ($needEndf -or (Test-GitRepo $EndfRoot)) {
     $endfCommit = Get-GitOutput @('-C', $Root, 'rev-parse', "HEAD:$EndfSubdir")
     if ($endfCommit.Count -eq 0) { Fail "$EndfSubdir is not part of release $Release" }
     $endfCommit = [string]$endfCommit[0]
+    if (Test-GitRepo $EndfRoot) { Assert-CloneOf $EndfRoot $RootCommitEndf 'fendl-endf' }
     if (-not (Test-GitRepo $EndfRoot)) {
         $endfUrl = Get-GitOutput @('-C', $Root, 'config', '-f', '.gitmodules', "submodule.$EndfSubdir.url")
         if ($endfUrl.Count -eq 0) { Fail "no URL for $EndfSubdir in .gitmodules" }
