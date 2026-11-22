@@ -113,6 +113,14 @@ A few things to keep in mind:
   `export PATH="$PWD/fendl-processed/.git/fendl-get-venv/bin:$PATH"`.
 - `--copy-to` overwrites files with the same names in the target folder,
   which must be outside the clone.
+- Before downloading, the script checks that the files fit on the disk
+  and refuses if fewer than 2 GB would remain free (git-annex is set up
+  to keep the same reserve). `--dry-run` shows the size of a selection.
+- AWS credentials in your environment (`AWS_ACCESS_KEY_ID` etc.) are
+  ignored: the files are public, and git-annex would otherwise use the
+  credentials and store them in the clone.
+- If a run is interrupted (e.g. with Ctrl-C), simply run the same
+  command again; it continues where it stopped.
 - The `git-annex` package on PyPI provides binaries for Linux with
   glibc 2.34 or newer (e.g. Ubuntu 22.04+, Debian 12+, RHEL 9+) and
   for macOS 15 or newer. On other systems, [install git-annex] yourself,
@@ -148,7 +156,7 @@ Differences from `fendl-get.sh`:
   Files that have not been downloaded yet are small placeholder files.
   Downloaded content is stored twice (in `.git\annex` and in the
   working tree), so plan for twice the disk space of the files you
-  download.
+  download (the disk-space check accounts for this).
 - The ENDF files are cloned as a separate repository into the
   `fendl-endf` folder (instead of as a git submodule), because
   git-annex replaces the `.git` file of a submodule by a symbolic
@@ -208,7 +216,10 @@ $env:TEST_SHELL = 'powershell'; ./tests/test-fendl-get.ps1   # Windows PowerShel
 ```
 The tests need network access. They also check that wrong arguments
 (e.g. an unrelated repository as `--dir`, a non-empty folder as `--venv`)
-are refused without changing anything, and that the clone can be
-removed with the commands given above. They run in GitHub Actions on
+are refused without changing anything, that AWS credentials in the
+environment are ignored, that an interrupted venv installation is
+repaired, that downloads which do not fit on the disk are refused, that
+the clone can be removed with the commands given above, and that
+nothing changed in the home directory and the global git config. They run in GitHub Actions on
 Linux, macOS and Windows for every push and weekly, to notice breakage
 caused by external changes (new git-annex releases, storage, GitHub).

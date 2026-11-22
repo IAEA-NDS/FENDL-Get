@@ -132,6 +132,21 @@ $Expected = @(
     'fendl-endf/general-purpose/neutron/n_0125_1-H-1.endf'
 )
 
+# Side effects outside the clone: entries in the home directory (3 levels,
+# e.g. AppData\Local\pip, ~/.cache/pip) and the global git config. Excluded
+# are files that PowerShell and Windows themselves keep changing.
+$Noise = '(?i)^/(ntuser|\.cache/powershell|\.local/share/powershell)|/PowerShell($|/)'
+function Get-HomeSnapshot {
+    $h = if ($OnWindows) { $env:USERPROFILE } else { $HOME }
+    $entries = Get-ChildItem -LiteralPath $h -Force -Recurse -Depth 2 -ErrorAction SilentlyContinue |
+        ForEach-Object { $_.FullName.Substring($h.Length) -replace '\\', '/' } |
+        Where-Object { $_ -notmatch $Noise } | Sort-Object
+    $eap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $cfg = (& git config --global --list 2>$null) -join "`n" } finally { $ErrorActionPreference = $eap }
+    return ((@($entries) + '--- global git config:' + $cfg) -join "`n")
+}
+$HomeBefore = Get-HomeSnapshot
+
 Write-Host '=== 1. argument errors'
 if (Invoke-FendlGet @('-Type', 'bogus')) { Fail 'invalid type accepted' }
 Assert-Log "unknown type 'bogus'" 'no error message for invalid type'
@@ -203,7 +218,35 @@ Assert-Fails 'outside the clone' @('-Dir', $Clone, '-Type', 'ace', '-Particle', 
 Assert-Fails 'outside the clone' @('-Dir', $Clone, '-Type', 'ace', '-Particle', 'n', '-Match', '01H_001', '-CopyTo', (Join-Path $Clone 'general-purpose'))
 Pass 'protection against wrong arguments'
 
-Write-Host '=== 9. removal as documented'
+Write-Host '=== 9. AWS credentials, interrupted venv creation, disk space'
+# AWS credentials in the environment are not used (nor stored in the clone).
+if (-not (Invoke-FendlGet @('-Type', 'ace', '-Particle', 'n', '-Match', '01H_001', '-Drop'))) { Fail 'drop failed' }
+$env:AWS_ACCESS_KEY_ID = 'AKIAFAKEFAKEFAKEFAKE'; $env:AWS_SECRET_ACCESS_KEY = 'fakesecret'
+try { $ok = Invoke-FendlGet @('-Type', 'ace', '-Particle', 'n', '-Match', '01H_001') }
+finally { Remove-Item Env:AWS_ACCESS_KEY_ID, Env:AWS_SECRET_ACCESS_KEY -ErrorAction SilentlyContinue }
+if (-not $ok) { Fail 'download with AWS credentials in the environment failed' }
+Test-Content 'general-purpose/neutron/ace/01H_001'
+$creds = Join-Path $Clone '.git/annex/creds'
+if ((Test-Path $creds) -and @(Get-ChildItem -Force $creds).Count -gt 0) { Fail 'AWS credentials were stored in the clone' }
+# An incomplete venv (e.g. from an interrupted first run) is repaired.
+if ($Extra.Count -eq 0) {
+    Remove-Item -Recurse -Force (Join-Path $VenvDir $(if ($OnWindows) { 'Lib' } else { 'lib' }))
+    if (-not (Invoke-FendlGet @('-Type', 'ace', '-Particle', 'n', '-Match', '01H_001', '-DryRun'))) { Fail 'incomplete venv was not repaired' }
+    Assert-Log 'Creating Python venv' 'incomplete venv was not recreated'
+}
+# Downloads that would leave less than the reserve free are refused.
+$env:FENDL_GET_MIN_FREE = '999000000000000'
+try {
+    if (-not (Invoke-FendlGet @('-Type', 'njoy-input', '-Particle', 'n', '-Match', '01H_002*', '-DryRun'))) { Fail 'dry run failed' }
+    Assert-Log 'not enough disk space' 'dry run did not warn about disk space'
+    if (Invoke-FendlGet @('-Type', 'njoy-input', '-Particle', 'n', '-Match', '01H_002*')) { Fail 'download not refused despite lack of disk space' }
+    Assert-Log 'not enough disk space' 'unexpected error message for lack of disk space'
+} finally { Remove-Item Env:FENDL_GET_MIN_FREE -ErrorAction SilentlyContinue }
+if (Test-Present 'general-purpose/neutron/njoy/01H_002.nji') { Fail 'file downloaded despite lack of disk space' }
+if (((& git -C $Clone config --get annex.diskreserve) -join '') -ne '2 gigabytes') { Fail 'annex.diskreserve not set' }
+Pass 'AWS credentials ignored, venv repaired, disk space checked'
+
+Write-Host '=== 10. removal as documented'
 if ($OnWindows) {
     # the command given in the README for Windows
     Remove-Item -Recurse -Force $Clone
@@ -213,6 +256,16 @@ if ($OnWindows) {
 }
 if (Test-Path $Clone) { Fail 'clone could not be removed with the documented command' }
 Pass 'removal of the clone (including the venv)'
+
+Write-Host '=== 11. nothing changed outside the clone'
+$HomeAfter = Get-HomeSnapshot
+if ($HomeAfter -ne $HomeBefore) {
+    $b = $HomeBefore -split "`n"; $a = $HomeAfter -split "`n"
+    $script:Log = (@($a | Where-Object { $b -notcontains $_ } | ForEach-Object { "  + $_" }) +
+                   @($b | Where-Object { $a -notcontains $_ } | ForEach-Object { "  - $_" })) -join "`n"
+    Fail 'the home directory or the global git config changed'
+}
+Pass 'no changes in the home directory and the global git config'
 
 Write-Host "=== all $($script:Passed) checks passed"
 Remove-Work

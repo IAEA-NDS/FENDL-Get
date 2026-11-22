@@ -150,6 +150,10 @@ $PipSpec = if ($env:FENDL_GET_PIP_SPEC) { $env:FENDL_GET_PIP_SPEC } else { 'git-
 # pip >= 26.1 needs Python >= 3.10.
 $PipPins = @('pip==26.3; python_version >= "3.10"', 'pip==26.0.1; python_version < "3.10"')
 $MaxJobs = 64
+# Free disk space to keep in the clone's file system (bytes); git-annex is
+# configured to keep the same (annex.diskreserve).
+$MinFree = [double]2000000000
+if ($env:FENDL_GET_MIN_FREE) { $MinFree = [double]$env:FENDL_GET_MIN_FREE }
 $VenvSubdir = 'fendl-get-venv'
 $VenvMarker = '.fendl-get-venv'   # marks venvs created by this script
 # Root commits of the data branches, used to recognise existing clones.
@@ -246,6 +250,13 @@ if ($Jobs -lt 1 -or $Jobs -gt $MaxJobs) { Fail "-Jobs expects an integer from 1 
 if ($Drop -and $CopyTo) { Fail '-Drop and -CopyTo cannot be combined' }
 if ($CopyTo) { $CopyTo = Resolve-FullPath $CopyTo }
 if ($Venv) { $Venv = Resolve-FullPath $Venv }
+
+# git-annex would use AWS credentials from the environment for the S3
+# remotes, fail with them on the public buckets, and store them in the
+# clone. Drop them for this script (the user's environment is unchanged).
+foreach ($v in @('AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN')) {
+    Remove-Item -Path "Env:$v" -ErrorAction SilentlyContinue
+}
 if ($Release -eq '') { $Release = $DefaultRelease }
 $Match = Split-List $Match -KeepCase
 $Path = Split-List $Path -KeepCase
@@ -373,10 +384,24 @@ function Install-VenvAnnex {
     }
     if ((Test-Path -LiteralPath $marker) -and (Test-Path -LiteralPath $VenvAnnex) -and
         (Invoke-Native $VenvAnnex @('version') -Quiet)) { return $true }
-    if (-not (Test-Path -LiteralPath $VenvPython)) {
+    # (Re)create the venv if it is missing or incomplete, e.g. after an
+    # interrupted earlier run.
+    $complete = (Test-Path -LiteralPath $VenvPython) -and
+                (Invoke-Native $VenvPython @('-m', 'pip', '--version') -Quiet)
+    if (-not $complete) {
         $py = Find-Python
         if ($null -eq $py) { Write-Warn 'Python 3 not found (https://www.python.org/downloads/)'; return $false }
-        $created = -not (Test-Path -LiteralPath $Venv)
+        $created = $false
+        if (-not (Test-Path -LiteralPath $Venv)) {
+            if (-not (Test-Path -LiteralPath (Split-Path $Venv -Parent))) {
+                Fail "cannot create $Venv (its parent directory does not exist)"
+            }
+            New-Item -ItemType Directory -Path $Venv | Out-Null
+            $created = $true
+        }
+        # Mark the directory before filling it, so that an interrupted run
+        # is recognised and resumed next time.
+        New-Item -ItemType File -Path $marker -Force | Out-Null
         Write-Msg "Creating Python venv in $Venv"
         $rest = @()
         if ($py.Count -gt 1) { $rest = $py[1..($py.Count - 1)] }
@@ -386,7 +411,6 @@ function Install-VenvAnnex {
             Write-Warn 'could not create a Python venv'
             return $false
         }
-        New-Item -ItemType File -Path $marker -Force | Out-Null
     }
     # Old bundled pip versions may not know the platform tags of the wheels.
     # --no-cache-dir: leave no pip cache behind in the user's profile.
@@ -526,6 +550,11 @@ function Initialize-Annex([string]$Repo) {
             Fail "git annex init failed in $Repo"
         }
     }
+    # Never fill the disk: git-annex refuses downloads that would leave
+    # less than this free (its default is only 100 MB).
+    if (-not (Get-GitConfig $Repo 'annex.diskreserve')) {
+        Invoke-GitQuiet @('-C', $Repo, 'config', 'annex.diskreserve', '2 gigabytes') | Out-Null
+    }
     if (-not (Get-GitConfig $Repo 'annex.retry')) {
         Invoke-GitQuiet @('-C', $Repo, 'config', 'annex.retry', '3') | Out-Null
     }
@@ -579,6 +608,13 @@ function Enable-S3Remote([string]$Repo, [hashtable]$R) {
         }
         Invoke-GitQuiet @('-C', $Repo, 'config', "remote.$name.fendl-get-public", 'true') | Out-Null
     }
+    # Remove AWS credentials that git-annex may have stored for this remote
+    # in an earlier run (they are not needed and would leak if the clone is
+    # shared, e.g. via a synchronised folder).
+    $gd = Get-GitOutput @('-C', $Repo, 'rev-parse', '--absolute-git-dir')
+    if ($gd.Count -gt 0) {
+        Remove-Item -LiteralPath (Join-Path ([string]$gd[0]) "annex/creds/$($R.Uuid)") -Force -ErrorAction SilentlyContinue
+    }
     # git-annex >= 10.2026 requires special remotes configured in the
     # repository to be verified. Confirm only for the expected bucket.
     $out = (Get-NativeOutput 'git' @('-C', $Repo, 'annex', 'verifyremote', $name) -Merge) -join "`n"
@@ -595,6 +631,7 @@ function Enable-S3Remote([string]$Repo, [hashtable]$R) {
 }
 
 if (-not (Switch-Release $Root $commit '')) { Write-Msg "Release $Release is checked out" }
+Initialize-Annex $Root   # (also applies current settings to existing clones)
 Enable-S3Remote $Root $S3Main
 
 # The ENDF files live in the fendl-endf repository, registered as a git
@@ -622,6 +659,7 @@ if ($needEndf -or (Test-GitRepo $EndfRoot)) {
         if (-not (Invoke-Git @('-C', $EndfRoot, 'fetch', '--quiet', '--tags', 'origin'))) { Fail "git fetch failed in $EndfSubdir" }
     }
     Switch-Release $EndfRoot $endfCommit " ($EndfSubdir)" | Out-Null
+    Initialize-Annex $EndfRoot
     Enable-S3Remote $EndfRoot $S3Endf
 }
 
@@ -699,7 +737,45 @@ if ($Drop) {
     Write-Msg "Selected $($all.Count) files ($(Format-Size $bytesAll)); to download: $($todo.Count) files ($(Format-Size $bytesTodo))"
 }
 
+# Free bytes and an identifier of the file system holding a (possibly not
+# yet existing) path.
+function Get-FsInfo([string]$p) {
+    while (-not (Test-Path -LiteralPath $p)) { $p = Split-Path $p -Parent }
+    try {
+        if ($OnWindows) {
+            $d = [System.IO.DriveInfo]::new([System.IO.Path]::GetPathRoot($p))
+            return @{ Free = [double]$d.AvailableFreeSpace; Id = $d.Name.ToUpperInvariant() }
+        }
+        $free = [double]([System.IO.DriveInfo]::new($p).AvailableFreeSpace)
+        $df = Get-NativeOutput 'df' @('-Pk', $p)
+        $id = if ($df.Count -ge 2) { (([string]$df[1]) -split '\s+')[0] } else { $p }
+        return @{ Free = $free; Id = $id }
+    } catch { return $null }
+}
+
+# Check that the downloads (and copies) fit, keeping $MinFree free. In
+# unlocked mode, downloaded content is stored twice (.git/annex + file).
+$spaceProblem = ''
+if (-not $Drop) {
+    $needClone = 2 * [double]$bytesTodo
+    $needCopy = if ($CopyTo) { [double]$bytesAll } else { 0 }
+    $fsClone = Get-FsInfo $Root
+    $fsCopy = if ($CopyTo) { Get-FsInfo $CopyTo } else { $null }
+    if ($null -ne $fsCopy -and $null -ne $fsClone -and $fsCopy.Id -eq $fsClone.Id) {
+        $needClone += $needCopy; $needCopy = 0
+    }
+    if ($null -eq $fsClone) {
+        Write-Warn 'could not determine the free disk space; not checking it'
+    } elseif ($needClone + $MinFree -gt $fsClone.Free) {
+        $spaceProblem = "not enough disk space for ${Root}: $(Format-Size $needClone) needed, $(Format-Size $fsClone.Free) available, and $(Format-Size $MinFree) are kept free"
+    }
+    if ($needCopy -gt 0 -and $null -ne $fsCopy -and $needCopy + $MinFree -gt $fsCopy.Free) {
+        $spaceProblem = "not enough disk space for ${CopyTo}: $(Format-Size $needCopy) needed, $(Format-Size $fsCopy.Free) available, and $(Format-Size $MinFree) are kept free"
+    }
+}
+
 if ($DryRun) {
+    if ($spaceProblem) { Write-Warn $spaceProblem }
     if ($todo.Count -gt 0) {
         if ($Drop) { Write-Host 'Files that would be dropped:' } else { Write-Host 'Files that would be downloaded:' }
         foreach ($f in $todo) { Write-Host "  $($f.File)" }
@@ -708,6 +784,7 @@ if ($DryRun) {
 }
 
 # ---------------------------------------------------------------- transfer
+if ($spaceProblem) { Fail "$spaceProblem (choose a smaller selection, see -DryRun, or another -Dir)" }
 $ok = $true
 if ($todo.Count -gt 0) {
     foreach ($j in $jobList) {

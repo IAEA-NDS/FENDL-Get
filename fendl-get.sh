@@ -46,6 +46,9 @@ PIP_SPEC="${FENDL_GET_PIP_SPEC:-git-annex==10.20261026}"
 PIP_PIN_NEW='pip==26.3; python_version >= "3.10"'
 PIP_PIN_OLD='pip==26.0.1; python_version < "3.10"'
 MAX_JOBS=64
+# Free disk space to keep in the clone's file system (bytes); git-annex is
+# configured to keep the same (annex.diskreserve).
+MIN_FREE="${FENDL_GET_MIN_FREE:-2000000000}"
 # Root commits of the data branches, used to recognise existing clones.
 ROOT_COMMIT_MAIN="705c960547e89788261fe9bfcf0b12602f6db072"
 ROOT_COMMIT_ENDF="5b1d5b8cb48bb0c3e237850dbec163333dc921a9"
@@ -193,6 +196,12 @@ case "$JOBS" in ''|*[!0-9]*) die "--jobs expects an integer from 1 to $MAX_JOBS"
 # The script changes into the clone later, so make paths absolute now.
 case "$COPY_TO" in ''|/*) ;; *) COPY_TO="$(pwd -P)/$COPY_TO" ;; esac
 case "$VENV" in ''|/*) ;; *) VENV="$(pwd -P)/$VENV" ;; esac
+case "$MIN_FREE" in ''|*[!0-9]*) die "FENDL_GET_MIN_FREE expects a number of bytes" ;; esac
+
+# git-annex would use AWS credentials from the environment for the S3
+# remotes, fail with them on the public buckets, and store them in the
+# clone. Drop them for this script (the user's environment is unchanged).
+unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
 
 # Normalise type list.
 sel_types=""
@@ -314,9 +323,17 @@ setup_venv() {
         return 0
     fi
     find_python
-    if [ ! -x "$VENV/bin/python" ]; then
+    # (Re)create the venv if it is missing or incomplete, e.g. after an
+    # interrupted earlier run.
+    if [ ! -x "$VENV/bin/python" ] || ! "$VENV/bin/python" -m pip --version >/dev/null 2>&1; then
         local created=0
-        [ -e "$VENV" ] || created=1
+        if [ ! -e "$VENV" ]; then
+            mkdir -- "$VENV" 2>/dev/null || die "cannot create $VENV (does its parent directory exist?)"
+            created=1
+        fi
+        # Mark the directory before filling it, so that an interrupted run
+        # is recognised and resumed next time.
+        : > "$VENV/$VENV_MARKER"
         msg "Creating Python venv in $VENV"
         if ! "$PYTHON" -m venv "$VENV"; then
             # Clean up only what this script created itself.
@@ -324,7 +341,6 @@ setup_venv() {
             warn "could not create a venv (on Debian/Ubuntu: sudo apt install python3-venv)"
             return 1
         fi
-        : > "$VENV/$VENV_MARKER"
     fi
     # The pip bundled with older Pythons (e.g. Python 3.9 of the macOS
     # Command Line Tools) may not recognise the platform tags of the
@@ -449,6 +465,10 @@ annex_init() {  # annex_init: initialise git-annex in the current repo once
     fi
     # Retry transfers interrupted by transient network/S3 errors.
     [ -n "$(git config --get annex.retry 2>/dev/null || true)" ] || git config annex.retry 3
+    # Never fill the disk: git-annex refuses downloads that would leave
+    # less than this free (its default is only 100 MB).
+    [ -n "$(git config --get annex.diskreserve 2>/dev/null || true)" ] ||
+        git config annex.diskreserve "2 gigabytes"
 }
 
 # Enable a (public, anonymous) S3 special remote in the current repository.
@@ -468,6 +488,10 @@ EOF
             die "could not enable special remote $name ($uuid)"
         git config "remote.$name.fendl-get-public" true
     fi
+    # Remove AWS credentials that git-annex may have stored for this remote
+    # in an earlier run (they are not needed and would leak if the clone is
+    # shared, e.g. via a synchronised folder).
+    rm -f -- "$(git rev-parse --absolute-git-dir)/annex/creds/$uuid"
     # git-annex >= 10.2026 refuses special remotes whose config came from the
     # repository until they are verified. Confirm only if the remote really
     # points to the expected bucket.
@@ -579,7 +603,37 @@ else
     msg "Selected $n_all files ($(human_size "$b_all")); to download: $n_todo files ($(human_size "$b_todo"))"
 fi
 
+# Free bytes and device of the file system holding a (possibly not yet
+# existing) path.
+fs_free() { _d=$1; while [ ! -d "$_d" ]; do _d=$(dirname "$_d"); done
+            df -Pk "$_d" 2>/dev/null | awk 'NR == 2 { printf "%.0f", $4 * 1024 }'; }
+fs_dev()  { _d=$1; while [ ! -d "$_d" ]; do _d=$(dirname "$_d"); done
+            df -Pk "$_d" 2>/dev/null | awk 'NR == 2 { print $1 }'; }
+
+# Check that the downloads (and copies) fit, keeping MIN_FREE free.
+space_problem=""
+if [ $DROP -eq 0 ]; then
+    need_clone=$b_todo; need_copy=0
+    [ -n "$COPY_TO" ] && need_copy=$b_all
+    free_clone=$(fs_free "$ROOT")
+    if [ -n "$COPY_TO" ] && [ "$(fs_dev "$COPY_TO")" = "$(fs_dev "$ROOT")" ]; then
+        need_clone=$((need_clone + need_copy)); need_copy=0
+    fi
+    if [ -z "$free_clone" ]; then
+        warn "could not determine the free disk space; not checking it"
+    elif [ $((need_clone + MIN_FREE)) -gt "$free_clone" ]; then
+        space_problem="not enough disk space for $ROOT: $(human_size "$need_clone") needed, $(human_size "$free_clone") available, and $(human_size "$MIN_FREE") are kept free"
+    fi
+    if [ "$need_copy" -gt 0 ]; then
+        free_copy=$(fs_free "$COPY_TO")
+        if [ -n "$free_copy" ] && [ $((need_copy + MIN_FREE)) -gt "$free_copy" ]; then
+            space_problem="not enough disk space for $COPY_TO: $(human_size "$need_copy") needed, $(human_size "$free_copy") available, and $(human_size "$MIN_FREE") are kept free"
+        fi
+    fi
+fi
+
 if [ $DRY_RUN -eq 1 ]; then
+    [ -z "$space_problem" ] || warn "$space_problem"
     if [ "$n_todo" -gt 0 ]; then
         [ $DROP -eq 1 ] && echo "Files that would be dropped:" || echo "Files that would be downloaded:"
         awk -F '\t' '{ print "  " $2 }' "$TMP/missing"
@@ -588,6 +642,7 @@ if [ $DRY_RUN -eq 1 ]; then
 fi
 
 # ---------------------------------------------------------------- transfer
+[ -z "$space_problem" ] || die "$space_problem (choose a smaller selection, see --dry-run, or another --dir)"
 status=0
 if [ "$n_todo" -gt 0 ]; then
     for job in "${JOBLIST[@]}"; do

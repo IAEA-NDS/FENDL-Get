@@ -91,6 +91,15 @@ general-purpose/neutron/ace/01H_003.xsd
 fendl-endf/general-purpose/neutron/n_0125_1-H-1.endf
 "
 
+# Side effects outside the clone: entries in the home directory (3 levels,
+# e.g. ~/.cache/pip, ~/Library/Caches/...) and the global git config.
+snapshot() {
+    find "$HOME" -mindepth 1 -maxdepth 3 2>/dev/null | LC_ALL=C sort
+    echo "--- global git config:"
+    git config --global --list 2>/dev/null || true
+}
+snapshot > "$WORK/home-before"
+
 echo "=== 1. argument errors"
 if "$BASH_BIN" "$SCRIPT" -t bogus > "$LOG" 2>&1; then fail "invalid type accepted"; fi
 grep -q "unknown type 'bogus'" "$LOG" || fail "no error message for invalid type"
@@ -164,9 +173,40 @@ run_fails 'outside the clone' --dir "$CLONE" -t ace -p n -m 01H_001 --copy-to "$
 run_fails 'outside the clone' --dir "$CLONE" -t ace -p n -m 01H_001 --copy-to "$CLONE/general-purpose"
 pass "protection against wrong arguments"
 
-echo "=== 8. removal as documented"
+echo "=== 8. AWS credentials, interrupted venv creation, disk space"
+# AWS credentials in the environment are not used (nor stored in the clone).
+AWS_ACCESS_KEY_ID=AKIAFAKEFAKEFAKEFAKE AWS_SECRET_ACCESS_KEY=fakesecret \
+    run -t ace -p n -m 01H_001 || fail "download with AWS credentials in the environment failed"
+check_content general-purpose/neutron/ace/01H_001
+[ -z "$(ls -A "$CLONE/.git/annex/creds" 2>/dev/null)" ] || fail "AWS credentials were stored in the clone"
+# An incomplete venv (e.g. from an interrupted first run) is repaired.
+if [ ${#EXTRA[@]} -eq 0 ]; then
+    rm -rf "$CLONE/.git/fendl-get-venv/lib"
+    run -t ace -p n -m 01H_001 -n || fail "incomplete venv was not repaired"
+    grep -q 'Creating Python venv' "$LOG" || fail "incomplete venv was not recreated"
+fi
+# Downloads that would leave less than the reserve free are refused.
+FENDL_GET_MIN_FREE=999000000000000 run -t njoy-input -p n -m '01H_002*' -n || fail "dry run failed"
+grep -q 'not enough disk space' "$LOG" || fail "dry run did not warn about disk space"
+if FENDL_GET_MIN_FREE=999000000000000 run -t njoy-input -p n -m '01H_002*'; then
+    fail "download not refused despite lack of disk space"
+fi
+grep -q 'not enough disk space' "$LOG" || fail "unexpected error message for lack of disk space"
+[ ! -f "$CLONE/general-purpose/neutron/njoy/01H_002.nji" ] || fail "file downloaded despite lack of disk space"
+[ "$(git -C "$CLONE" config --get annex.diskreserve)" = "2 gigabytes" ] || fail "annex.diskreserve not set"
+pass "AWS credentials ignored, venv repaired, disk space checked"
+
+echo "=== 9. removal as documented"
 chmod -R u+w "$CLONE" && rm -rf "$CLONE"
 [ ! -e "$CLONE" ] || fail "clone could not be removed with the documented command"
 pass "removal of the clone (including the venv)"
+
+echo "=== 10. nothing changed outside the clone"
+snapshot > "$WORK/home-after"
+if ! cmp -s "$WORK/home-before" "$WORK/home-after"; then
+    diff "$WORK/home-before" "$WORK/home-after" | sed 's/^/  /' > "$LOG" || true
+    fail "the home directory or the global git config changed"
+fi
+pass "no changes in the home directory and the global git config"
 
 echo "=== all $n_pass checks passed"
