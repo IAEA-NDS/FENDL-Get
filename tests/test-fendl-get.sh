@@ -122,6 +122,11 @@ run "${SEL[@]}" --copy-to "$OUT" || fail "download failed"
 for f in $EXPECTED; do check_content "$f" "$OUT/$f"; done
 if [ ${#EXTRA[@]} -eq 0 ]; then
     [ -f "$CLONE/.git/fendl-get-venv/.fendl-get-venv" ] || fail "venv not inside the clone"
+    # the pinned versions were installed (not silently skipped)
+    pipv=$("$CLONE/.git/fendl-get-venv/bin/python" -m pip --version | cut -d ' ' -f 2)
+    case "$pipv" in 26.3|26.0.1) ;; *) fail "unexpected pip version $pipv in the venv" ;; esac
+    [ -n "${FENDL_GET_PIP_SPEC:-}" ] || "$CLONE/.git/fendl-get-venv/bin/git-annex" version --raw |
+        grep -q '^10\.20261026' || fail "git-annex in the venv is not the pinned version"
 fi
 pass "download from S3 and --copy-to (contents verified)"
 
@@ -135,7 +140,14 @@ run general-purpose/neutron/njoy/01H_001.nji || fail "download by path failed"
 check_content general-purpose/neutron/njoy/01H_001.nji
 run -t hdf5 -p photon -m 'H.h5' || fail "hdf5 download failed"
 check_content general-purpose/atom/hdf5/H.h5
-pass "paths, hdf5, photon alias"
+# --release with a commit id and a relative revision, then back
+c=$(git -C "$CLONE" rev-parse --short=9 'FENDL-3.2c^{commit}')
+run -r "$c" -t ace -p p -m 01H_001 -n || fail "--release with a commit id failed"
+grep -q "Checking out $c" "$LOG" || fail "commit $c not checked out"
+run -r 'FENDL-3.2c~1' -t ace -p p -m 01H_001 -n || fail "--release FENDL-3.2c~1 failed"
+run -t ace -p n -m 01H_001 -n || fail "switching back to the default release failed"
+grep -q "Checking out fendl32d_prep" "$LOG" || fail "default release not checked out again"
+pass "paths, hdf5, photon alias, revisions as --release"
 
 echo "=== 6. drop"
 run -t ace -p n -m '01H_001' --drop || fail "drop failed"

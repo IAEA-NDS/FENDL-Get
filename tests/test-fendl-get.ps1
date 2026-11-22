@@ -136,6 +136,9 @@ $Expected = @(
 # e.g. AppData\Local\pip, ~/.cache/pip) and the global git config. Excluded
 # are files that PowerShell and Windows themselves keep changing.
 $Noise = '(?i)^/(ntuser|\.cache/powershell|\.local/share/powershell)|/PowerShell($|/)'
+# On GitHub's Windows runners, Firefox's background tasks create these at
+# random times (seen once in CI; nothing in the scripts uses Mozilla).
+if ($env:GITHUB_ACTIONS -eq 'true') { $Noise += '|(?i)^/AppData/(Local|Roaming)/Mozilla($|/)' }
 function Get-HomeSnapshot {
     $h = if ($OnWindows) { $env:USERPROFILE } else { $HOME }
     $entries = Get-ChildItem -LiteralPath $h -Force -Recurse -Depth 2 -ErrorAction SilentlyContinue |
@@ -164,7 +167,15 @@ Pass 'dry run'
 Write-Host '=== 3. download with -CopyTo'
 if (-not (Invoke-FendlGet ($Sel + @('-CopyTo', $Out)))) { Fail 'download failed' }
 foreach ($f in $Expected) { Test-Content $f (Join-Path $Out $f) }
-if ($Extra.Count -eq 0 -and -not (Test-Path (Join-Path $VenvDir '.fendl-get-venv'))) { Fail 'venv not inside the clone' }
+if ($Extra.Count -eq 0) {
+    if (-not (Test-Path (Join-Path $VenvDir '.fendl-get-venv'))) { Fail 'venv not inside the clone' }
+    # the pinned versions were installed (not silently skipped)
+    $py = Join-Path $VenvBin $(if ($OnWindows) { 'python.exe' } else { 'python' })
+    $pipv = ((& $py -m pip --version) -split ' ')[1]
+    if (@('26.3', '26.0.1') -notcontains $pipv) { Fail "unexpected pip version $pipv in the venv" }
+    $annexv = ((& (Join-Path $VenvBin 'git-annex') version --raw) -join '')
+    if (-not $env:FENDL_GET_PIP_SPEC -and -not $annexv.StartsWith('10.20261026')) { Fail "git-annex in the venv is not the pinned version ($annexv)" }
+}
 Pass 'download from S3 and -CopyTo (contents verified)'
 
 Write-Host '=== 4. rerun is a no-op'
@@ -194,7 +205,12 @@ if (-not (Invoke-FendlGet $Sel)) { Fail 'switching back failed' }
 # only the file dropped in step 6 has to be downloaded again
 Assert-Log 'to download: 1 files' 'content of the default release lost after switching back'
 foreach ($f in $Expected) { Test-Content $f }
-Pass 'release switching'
+# -Release with a commit id and a revision that is no valid branch name
+$c = ((& git -C $Clone rev-parse --short=9 'FENDL-3.2c^{commit}') -join '').Trim()
+if (-not (Invoke-FendlGet @('-Release', "$c~0", '-Type', 'ace', '-Particle', 'p', '-Match', '01H_001', '-DryRun'))) { Fail "-Release $c~0 failed" }
+Assert-Log ([regex]::Escape("Checking out $c~0")) "revision $c~0 not checked out"
+if (-not (Invoke-FendlGet ($Sel + '-DryRun'))) { Fail 'switching back to the default release failed' }
+Pass 'release switching (tag, branch, commit id)'
 
 Write-Host '=== 8. protection against wrong arguments'
 # -Venv: a non-empty directory not created by the script is refused and left alone.

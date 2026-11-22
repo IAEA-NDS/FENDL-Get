@@ -43,8 +43,8 @@ VENV_SUBDIR="fendl-get-venv"
 # requirement, e.g. FENDL_GET_PIP_SPEC=git-annex for the newest release.
 PIP_SPEC="${FENDL_GET_PIP_SPEC:-git-annex==10.20261026}"
 # pip >= 26.1 needs Python >= 3.10; the macOS Command Line Tools have 3.9.
-PIP_PIN_NEW='pip==26.3; python_version >= "3.10"'
-PIP_PIN_OLD='pip==26.0.1; python_version < "3.10"'
+PIP_PIN_NEW="pip==26.3; python_version >= '3.10'"
+PIP_PIN_OLD="pip==26.0.1; python_version < '3.10'"
 MAX_JOBS=64
 # Free disk space to keep in the clone's file system (bytes); git-annex is
 # configured to keep the same (annex.diskreserve).
@@ -96,9 +96,10 @@ Selection:
                         e.g. general-purpose/neutron/ace/26Fe056
 
 Release and location:
-  -r, --release REF     FENDL release (git branch or tag) to check out,
-                        e.g. FENDL-3.2c, or 'latest' for the newest FENDL-*
-                        tag. Default: $DEFAULT_RELEASE.
+  -r, --release REF     FENDL release to check out: a git tag (e.g. FENDL-3.2c),
+                        a branch (e.g. fendl32d_prep), 'latest' for the newest
+                        FENDL-* tag, or any other git revision such as a full
+                        or abbreviated commit id. Default: $DEFAULT_RELEASE.
       --list-releases   Show available releases and exit.
   -d, --dir DIR         Where to clone the repository (default: ./fendl-processed).
                         An existing clone of fendl-processed is reused; any

@@ -93,6 +93,12 @@ Some examples:
 ./fendl-get.sh -r FENDL-3.2b -t ace
 ```
 
+`-r` (`--release`) accepts a git tag such as `FENDL-3.2b`, a branch
+such as `fendl32d_prep` (the default), `latest` for the newest
+`FENDL-*` tag, or any other git revision of [fendl-processed], e.g. a
+full or abbreviated commit id. The ENDF files are always taken from the
+[fendl-endf] commit that the selected fendl-processed commit refers to.
+
 Running the script again with the same or a different selection reuses
 the existing clone and venv and only downloads files that are not yet
 present. Other useful options are `--jobs N` (number of parallel

@@ -49,8 +49,10 @@
     general-purpose/neutron/ace/26Fe056 (can be given positionally).
 
 .PARAMETER Release
-    FENDL release (git branch or tag) to check out, e.g. FENDL-3.2c, or
-    'latest' for the newest FENDL-* tag. Default: fendl32d_prep.
+    FENDL release to check out: a git tag (e.g. FENDL-3.2c), a branch
+    (e.g. fendl32d_prep), 'latest' for the newest FENDL-* tag, or any other
+    git revision such as a full or abbreviated commit id. Default:
+    fendl32d_prep. See -ListReleases for the available tags and branches.
 
 .PARAMETER Dir
     Where to clone the repository (default: .\fendl-processed). An existing
@@ -147,8 +149,9 @@ $LocalBranchPrefix = 'fendl-get/'
 # Pinned versions (tested in CI). FENDL_GET_PIP_SPEC overrides the git-annex
 # requirement, e.g. FENDL_GET_PIP_SPEC=git-annex for the newest release.
 $PipSpec = if ($env:FENDL_GET_PIP_SPEC) { $env:FENDL_GET_PIP_SPEC } else { 'git-annex==10.20261026' }
-# pip >= 26.1 needs Python >= 3.10.
-$PipPins = @('pip==26.3; python_version >= "3.10"', 'pip==26.0.1; python_version < "3.10"')
+# pip >= 26.1 needs Python >= 3.10. (Single quotes: Windows PowerShell 5.1
+# drops double quotes inside arguments of native commands.)
+$PipPins = @("pip==26.3; python_version >= '3.10'", "pip==26.0.1; python_version < '3.10'")
 $MaxJobs = 64
 # Free disk space to keep in the clone's file system (bytes); git-annex is
 # configured to keep the same (annex.diskreserve).
@@ -563,7 +566,12 @@ function Initialize-Annex([string]$Repo) {
 # Check out $Commit on the local branch fendl-get/<release> and switch to the
 # git-annex adjusted (unlocked) branch, so that files are regular files.
 function Switch-Release([string]$Repo, [string]$Commit, [string]$Label) {
+    # Local branch named after the release; for revisions that are not valid
+    # in branch names (e.g. FENDL-3.2c~1), after the commit instead.
     $branch = "$LocalBranchPrefix$Release"
+    if (-not (Invoke-GitQuiet @('check-ref-format', "refs/heads/$branch(unlocked)"))) {
+        $branch = "$LocalBranchPrefix$($Commit.Substring(0, 12))"
+    }
     $adjusted = "adjusted/$branch(unlocked)"
     $current = Get-GitOutput @('-C', $Repo, 'symbolic-ref', '--short', '-q', 'HEAD')
     $current = if ($current.Count -gt 0) { [string]$current[0] } else { '' }
