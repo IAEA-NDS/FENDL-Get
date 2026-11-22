@@ -417,6 +417,13 @@ if (Test-GitRepo $Root) {
 }
 # Annexed object paths are long; avoid the 260 character limit on Windows.
 Invoke-GitQuiet @('-C', $Root, 'config', 'core.longpaths', 'true') | Out-Null
+# On Windows, let git write symbolic links as plain files from the first
+# checkout on. git-annex replaces them by regular files in unlocked mode
+# anyway, and when symlinks are enabled (e.g. Developer Mode), Git for
+# Windows may resolve the relative targets of annexed files to a wrong
+# directory, after which the checkout fails with "unable to stat
+# just-written file ...: Result too large".
+if ($OnWindows) { Invoke-GitQuiet @('-C', $Root, 'config', 'core.symlinks', 'false') | Out-Null }
 
 if ($ListReleases) {
     Write-Host "Default: $DefaultRelease"
@@ -557,6 +564,7 @@ if ($needEndf -or (Test-GitRepo $EndfRoot)) {
             Fail "git clone of $EndfSubdir failed"
         }
         Invoke-GitQuiet @('-C', $EndfRoot, 'config', 'core.longpaths', 'true') | Out-Null
+        if ($OnWindows) { Invoke-GitQuiet @('-C', $EndfRoot, 'config', 'core.symlinks', 'false') | Out-Null }
     }
     if (-not (Invoke-GitQuiet @('-C', $EndfRoot, 'cat-file', '-e', "$endfCommit^{commit}"))) {
         if (-not (Invoke-Git @('-C', $EndfRoot, 'fetch', '--quiet', '--tags', 'origin'))) { Fail "git fetch failed in $EndfSubdir" }
