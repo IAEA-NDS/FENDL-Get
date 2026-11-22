@@ -1,0 +1,131 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    # Weekly, to notice breakage caused by external changes
+    # (PyPI git-annex releases, S3 buckets, GitHub).
+    - cron: "0 6 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run shellcheck
+        run: shellcheck fendl-get.sh tests/test-fendl-get.sh
+
+  psscriptanalyzer:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run PSScriptAnalyzer (incl. Windows PowerShell 5.1 syntax)
+        shell: pwsh
+        run: |
+          Install-Module PSScriptAnalyzer -RequiredVersion 1.23.0 -Force -Scope CurrentUser
+          $settings = @{
+            Severity = @('Error', 'Warning')
+            ExcludeRules = @('PSAvoidUsingWriteHost', 'PSUseSingularNouns',
+                             'PSAvoidUsingPositionalParameters', 'PSUseApprovedVerbs',
+                             'PSUseShouldProcessForStateChangingFunctions')
+            Rules = @{ PSUseCompatibleSyntax = @{ Enable = $true; TargetVersions = @('5.1', '7.0') } }
+          }
+          # (-Path takes a single file)
+          $r = @(foreach ($f in 'fendl-get.ps1', 'tests/test-fendl-get.ps1') {
+            Invoke-ScriptAnalyzer -Path $f -Settings $settings
+          })
+          $r | Format-Table -AutoSize ScriptName, Line, RuleName, Message -Wrap
+          if ($r.Count -gt 0) { exit 1 }
+
+  e2e:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux (Ubuntu 24.04), git-annex from pip
+            os: ubuntu-24.04
+          - name: Linux (Ubuntu 22.04), git-annex from pip
+            os: ubuntu-22.04
+          - name: Linux, system git-annex (apt)
+            os: ubuntu-latest
+            apt_annex: true
+            test_args: --system-annex
+          # The combination a Mac user gets out of the box: bash 3.2 and
+          # the Python 3.9 of the Xcode Command Line Tools.
+          - name: macOS arm64, bash 3.2, CLT Python
+            os: macos-latest
+            test_bash: /bin/bash
+            python: /usr/bin/python3
+          - name: macOS x86_64, bash 3.2, CLT Python
+            os: macos-15-intel
+            test_bash: /bin/bash
+            python: /usr/bin/python3
+          - name: macOS arm64, Homebrew bash and python3
+            os: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install git-annex with apt
+        if: matrix.apt_annex
+        run: sudo apt-get update -q && sudo apt-get install -y -q git-annex
+
+      - name: Show environment
+        env:
+          PY: ${{ matrix.python || 'python3' }}
+          TEST_BASH: ${{ matrix.test_bash || 'bash' }}
+        run: |
+          uname -a
+          "$TEST_BASH" --version | head -n 1
+          git --version
+          "$PY" --version
+          "$PY" -c 'import platform; print("platform:", platform.platform())'
+
+      - name: Run end-to-end test
+        env:
+          TEST_BASH: ${{ matrix.test_bash || 'bash' }}
+          TEST_ARGS: ${{ matrix.test_args || '' }}
+          PYTHON: ${{ matrix.python || '' }}
+        run: ./tests/test-fendl-get.sh
+
+  e2e-powershell:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows, PowerShell 7, git-annex from pip
+            os: windows-latest
+            test_shell: pwsh
+          - name: Windows, Windows PowerShell 5.1, git-annex from pip
+            os: windows-latest
+            test_shell: powershell
+          - name: Linux, PowerShell 7 (fendl-get.ps1)
+            os: ubuntu-latest
+            test_shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show environment
+        shell: pwsh
+        run: |
+          $PSVersionTable | Format-Table -AutoSize
+          git --version
+          python --version
+          if ($IsWindows) { git config --show-origin --get core.symlinks }
+          exit 0   # git config exits 1 if the key is unset
+
+      - name: Run end-to-end test
+        shell: pwsh
+        env:
+          TEST_SHELL: ${{ matrix.test_shell }}
+        run: ./tests/test-fendl-get.ps1
