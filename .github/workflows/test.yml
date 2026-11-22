@@ -70,6 +70,11 @@ jobs:
             python: /usr/bin/python3
           - name: macOS arm64, Homebrew bash and python3
             os: macos-latest
+          # Canary: the newest git-annex release instead of the pinned one.
+          # If this fails while the others pass, do not update the pin.
+          - name: Linux, newest git-annex from PyPI (canary)
+            os: ubuntu-latest
+            pip_spec: git-annex
     steps:
       - uses: actions/checkout@v5
 
@@ -93,6 +98,7 @@ jobs:
           TEST_BASH: ${{ matrix.test_bash || 'bash' }}
           TEST_ARGS: ${{ matrix.test_args || '' }}
           PYTHON: ${{ matrix.python || '' }}
+          FENDL_GET_PIP_SPEC: ${{ matrix.pip_spec || '' }}
         run: ./tests/test-fendl-get.sh
 
   e2e-powershell:
