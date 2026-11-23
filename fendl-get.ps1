@@ -51,8 +51,9 @@
 .PARAMETER Release
     FENDL release to check out: a git tag (e.g. FENDL-3.2c), a branch
     (e.g. fendl32d_prep), 'latest' for the newest FENDL-* tag, or any other
-    git revision such as a full or abbreviated commit id. Default:
-    fendl32d_prep. See -ListReleases for the available tags and branches.
+    git revision such as a full or abbreviated commit id. Required (except
+    with -ListReleases), e.g. FENDL-3.2d-T4. See -ListReleases for the
+    available tags and branches.
 
 .PARAMETER Dir
     Where to clone the repository (default: .\fendl-processed). An existing
@@ -90,16 +91,16 @@
     Use the git-annex found on PATH instead of a venv.
 
 .EXAMPLE
-    .\fendl-get.ps1 -Type ace -Particle neutron
-    ACE files of the neutron sublibrary.
+    .\fendl-get.ps1 -Release FENDL-3.2d-T4 -Type ace -Particle neutron
+    ACE files of the neutron sublibrary of FENDL-3.2d-T4.
 
 .EXAMPLE
-    .\fendl-get.ps1 -Type endf,njoy-input -Particle n -Match '*Fe-*','26Fe*'
+    .\fendl-get.ps1 -Release FENDL-3.2d-T4 -Type endf,njoy-input -Particle n -Match '*Fe-*','26Fe*'
     ENDF and NJOY input files for the iron isotopes (ENDF and processed files
     use different naming schemes, hence two patterns).
 
 .EXAMPLE
-    .\fendl-get.ps1 -Type ace -Particle p,d -DryRun
+    .\fendl-get.ps1 -Release FENDL-3.2d-T4 -Type ace -Particle p,d -DryRun
     Show how much data the proton and deuteron ACE files comprise.
 
 .EXAMPLE
@@ -125,7 +126,7 @@ param(
     [string[]]$Type = @(),
     [string[]]$Particle = @(),
     [string[]]$Match = @(),
-    [string]$Release = 'fendl32d_prep',
+    [string]$Release = '',
     [string]$Dir = 'fendl-processed',
     [int]$Jobs = 4,
     [string]$CopyTo = '',
@@ -145,7 +146,7 @@ $ErrorActionPreference = 'Stop'
 # ---------------------------------------------------------------- settings
 $RepoUrl = 'https://github.com/iaea-nds/fendl-processed'
 $EndfSubdir = 'fendl-endf'
-$DefaultRelease = 'fendl32d_prep'
+$ExampleRelease = 'FENDL-3.2d-T4'   # used in messages only; -Release is required
 $LocalBranchPrefix = 'fendl-get/'
 # Pinned versions (tested in CI). FENDL_GET_PIP_SPEC overrides the git-annex
 # requirement, e.g. FENDL_GET_PIP_SPEC=git-annex for the newest release.
@@ -261,7 +262,6 @@ if ($Venv) { $Venv = Resolve-FullPath $Venv }
 foreach ($v in @('AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN')) {
     Remove-Item -Path "Env:$v" -ErrorAction SilentlyContinue
 }
-if ($Release -eq '') { $Release = $DefaultRelease }
 $Match = Split-List $Match -KeepCase
 $Path = Split-List $Path -KeepCase
 
@@ -289,9 +289,12 @@ foreach ($p in (Split-List $Particle)) {
 if ($selParticles.Count -eq 0) { $selParticles = $AllParticles }
 
 if (-not $ListReleases -and $selTypes.Count -eq 0 -and $Path.Count -eq 0) {
-    Write-Host "Usage: .\fendl-get.ps1 -Type <types> [-Particle <particles>] [options] [paths]"
+    Write-Host "Usage: .\fendl-get.ps1 -Release <release> -Type <types> [-Particle <particles>] [options] [paths]"
     Write-Host "       Get-Help .\fendl-get.ps1 -Detailed   for all options"
     Fail 'nothing selected: use -Type and/or give paths'
+}
+if (-not $ListReleases -and -not $Release) {
+    Fail "-Release is required, e.g. -Release $ExampleRelease (see -ListReleases)"
 }
 if ($selTypes.Count -eq 0 -and ($Particle.Count -gt 0 -or $Match.Count -gt 0)) {
     Fail '-Particle/-Match need -Type'
@@ -508,7 +511,6 @@ Invoke-GitQuiet @('-C', $Root, 'config', 'core.longpaths', 'true') | Out-Null
 if ($OnWindows) { Invoke-GitQuiet @('-C', $Root, 'config', 'core.symlinks', 'false') | Out-Null }
 
 if ($ListReleases) {
-    Write-Host "Default: $DefaultRelease"
     Write-Host 'Branches:'
     (Get-GitOutput @('-C', $Root, 'for-each-ref', '--format=%(refname:lstrip=3)', 'refs/remotes/origin/')) |
         Where-Object { $_ -ne 'HEAD' -and $_ -notmatch 'git-annex$' } | ForEach-Object { Write-Host "  $_" }

@@ -32,6 +32,7 @@ $Out = Join-Path $Work 'out'
 $VenvDir = Join-Path $Clone '.git/fendl-get-venv'   # default location
 $VenvBin = if ($OnWindows) { Join-Path $VenvDir 'Scripts' } else { Join-Path $VenvDir 'bin' }
 $script:Log = ''
+$TestRelease = 'FENDL-3.2d-T4'
 $script:Passed = 0
 
 function Pass([string]$t) { $script:Passed++; Write-Host "PASS: $t" -ForegroundColor Green }
@@ -52,11 +53,13 @@ function Remove-Work {
 }
 
 # Run fendl-get.ps1 in a separate PowerShell process (as users would).
-function Invoke-FendlGet([string[]]$Arguments, [switch]$NoDefaults) {
+function Invoke-FendlGet([string[]]$Arguments, [switch]$NoDefaults, [switch]$NoRelease) {
     $a = @('-NoProfile')
     if ($OnWindows) { $a += @('-ExecutionPolicy', 'Bypass') }
     $a += @('-File', $Script)
     if (-not $NoDefaults) { $a += @('-Dir', $Clone) + $Extra }
+    # fendl-get.ps1 requires -Release; tests that name one use their own.
+    if (-not $NoRelease -and $Arguments -notcontains '-Release') { $a += @('-Release', $TestRelease) }
     $a += $Arguments
     $eap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
     try { $script:Log = (& $Shell @a 2>&1 | ForEach-Object { "$_" }) -join "`n" }
@@ -154,6 +157,8 @@ Write-Host '=== 1. argument errors'
 if (Invoke-FendlGet @('-Type', 'bogus')) { Fail 'invalid type accepted' }
 Assert-Log "unknown type 'bogus'" 'no error message for invalid type'
 Assert-Fails 'integer from 1 to 64' @('-Type', 'ace', '-Jobs', '0')
+if (Invoke-FendlGet @('-Type', 'ace') -NoRelease) { Fail 'missing -Release accepted' }
+Assert-Log '-Release is required' 'no error message for missing -Release'
 Assert-Fails 'integer from 1 to 64' @('-Type', 'ace', '-Jobs', '65')
 Pass 'argument handling'
 
@@ -203,13 +208,14 @@ Test-Content 'general-purpose/proton/ace/01H_001'
 Test-Content 'fendl-endf/general-purpose/proton/p_0125_1-H-1.endf'
 if (-not (Invoke-FendlGet $Sel)) { Fail 'switching back failed' }
 # only the file dropped in step 6 has to be downloaded again
-Assert-Log 'to download: 1 files' 'content of the default release lost after switching back'
+Assert-Log 'to download: 1 files' 'content of the test release lost after switching back'
 foreach ($f in $Expected) { Test-Content $f }
 # -Release with a commit id and a revision that is no valid branch name
 $c = ((& git -C $Clone rev-parse --short=9 'FENDL-3.2c^{commit}') -join '').Trim()
 if (-not (Invoke-FendlGet @('-Release', "$c~0", '-Type', 'ace', '-Particle', 'p', '-Match', '01H_001', '-DryRun'))) { Fail "-Release $c~0 failed" }
 Assert-Log ([regex]::Escape("Checking out $c~0")) "revision $c~0 not checked out"
-if (-not (Invoke-FendlGet ($Sel + '-DryRun'))) { Fail 'switching back to the default release failed' }
+if (-not (Invoke-FendlGet (@('-Release', 'fendl32d_prep') + $Sel + '-DryRun'))) { Fail '-Release with a branch name failed' }
+Assert-Log 'Checking out fendl32d_prep' 'branch fendl32d_prep not checked out'
 Pass 'release switching (tag, branch, commit id)'
 
 Write-Host '=== 8. protection against wrong arguments'

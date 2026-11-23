@@ -12,8 +12,8 @@ scripts take care of everything needed to get them:
    and, if ENDF files are requested, the [fendl-endf] repository,
 2. create a Python virtual environment inside the clone and install
    `git-annex` into it with `pip`, so nothing is installed system-wide,
-3. check out the requested FENDL version
-   (by default the `fendl32d_prep` branch), and
+3. check out the requested FENDL version (always to be given
+   explicitly, see below), and
 4. download the selected files from public storage
    (no account or credentials are needed).
 
@@ -44,9 +44,13 @@ Download the script and make it executable:
 curl -LO https://raw.githubusercontent.com/iaea-nds/fendl-get/main/fendl-get.sh
 chmod +x fendl-get.sh
 ```
-Then select the files with `--type` (`-t`) and, optionally,
-the sublibraries with `--particle` (`-p`). Both accept
-comma-separated lists:
+Then choose the FENDL version with `--release` (`-r`), which is
+required, select the files with `--type` (`-t`) and, optionally,
+the sublibraries with `--particle` (`-p`). Both `--type` and
+`--particle` accept comma-separated lists.
+
+**The current development version to be tested by collaborators is
+`FENDL-3.2d-T4`**, so the examples below use `-r FENDL-3.2d-T4`.
 
 | Type          | Files                                  | Sublibraries          |
 |---------------|----------------------------------------|-----------------------|
@@ -71,30 +75,30 @@ not covered.
 Some examples:
 ```
 # ACE files of the neutron sublibrary
-./fendl-get.sh -t ace -p neutron
+./fendl-get.sh -r FENDL-3.2d-T4 -t ace -p neutron
 
 # Check first how much data a selection comprises (nothing is downloaded)
-./fendl-get.sh -t ace,hdf5 --dry-run
+./fendl-get.sh -r FENDL-3.2d-T4 -t ace,hdf5 --dry-run
 
 # ENDF files and NJOY input files for the iron isotopes. ENDF files
 # (n_2631_26-Fe-56.endf) and processed files (26Fe056) follow different
 # naming schemes, hence the two --match patterns.
-./fendl-get.sh -t endf,njoy-input -p n -m '*Fe-*' -m '26Fe*'
+./fendl-get.sh -r FENDL-3.2d-T4 -t endf,njoy-input -p n -m '*Fe-*' -m '26Fe*'
 
 # Single files, given as paths inside the repository
-./fendl-get.sh general-purpose/neutron/ace/26Fe056 \
+./fendl-get.sh -r FENDL-3.2d-T4 general-purpose/neutron/ace/26Fe056 \
     fendl-endf/general-purpose/neutron/n_2631_26-Fe-56.endf
 
 # Neutron ACE files as regular files in the directory ./ace-lib
-./fendl-get.sh -t ace -p n --copy-to ./ace-lib
+./fendl-get.sh -r FENDL-3.2d-T4 -t ace -p n --copy-to ./ace-lib
 
-# ACE files of a specific release
+# ACE files of another release
 ./fendl-get.sh --list-releases
-./fendl-get.sh -r FENDL-3.2b -t ace
+./fendl-get.sh -r FENDL-3.2c -t ace
 ```
 
-`-r` (`--release`) accepts a git tag such as `FENDL-3.2b`, a branch
-such as `fendl32d_prep` (the default), `latest` for the newest
+`-r` (`--release`) accepts a git tag such as `FENDL-3.2d-T4` or
+`FENDL-3.2c`, a branch such as `fendl32d_prep`, `latest` for the newest
 `FENDL-*` tag, or any other git revision of [fendl-processed], e.g. a
 full or abbreviated commit id. The ENDF files are always taken from the
 [fendl-endf] commit that the selected fendl-processed commit refers to.
@@ -148,16 +152,16 @@ A few things to keep in mind:
 Download the PowerShell script and run it:
 ```
 curl.exe -LO https://raw.githubusercontent.com/iaea-nds/fendl-get/main/fendl-get.ps1
-powershell -ExecutionPolicy Bypass -File .\fendl-get.ps1 -Type ace -Particle neutron
+powershell -ExecutionPolicy Bypass -File .\fendl-get.ps1 -Release FENDL-3.2d-T4 -Type ace -Particle neutron
 ```
 (`-ExecutionPolicy Bypass` is only needed if running scripts is
 disabled on your system.) The options correspond to those of
-`fendl-get.sh` described above, e.g. `-Type`, `-Particle`, `-Match`,
-`-Release`, `-DryRun`, `-Drop`, `-CopyTo` and `-Jobs`, and lists are
+`fendl-get.sh` described above, e.g. `-Release` (required), `-Type`,
+`-Particle`, `-Match`, `-DryRun`, `-Drop`, `-CopyTo` and `-Jobs`, and lists are
 separated by commas:
 ```
-.\fendl-get.ps1 -Type endf,njoy-input -Particle n -Match '*Fe-*,26Fe*'
-.\fendl-get.ps1 -Type ace,hdf5 -DryRun
+.\fendl-get.ps1 -Release FENDL-3.2d-T4 -Type endf,njoy-input -Particle n -Match '*Fe-*,26Fe*'
+.\fendl-get.ps1 -Release FENDL-3.2d-T4 -Type ace,hdf5 -DryRun
 ```
 Run `Get-Help .\fendl-get.ps1 -Detailed` for all options.
 

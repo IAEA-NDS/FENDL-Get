@@ -34,6 +34,9 @@ trap cleanup EXIT
 CLONE="$WORK/clone"
 OUT="$WORK/out"
 LOG="$WORK/log"
+# Release used by the tests (fendl-get.sh requires --release; a later -r in
+# the arguments of a test takes precedence).
+REL=FENDL-3.2d-T4
 
 n_pass=0
 pass() { n_pass=$((n_pass + 1)); echo "PASS: $*"; }
@@ -41,7 +44,7 @@ fail() { echo "FAIL: $*" >&2; echo "--- last output:" >&2; cat "$LOG" >&2; exit 
 
 # Run fendl-get.sh, logging its output to $LOG (and to the console).
 run() {
-    "$BASH_BIN" "$SCRIPT" --dir "$CLONE" \
+    "$BASH_BIN" "$SCRIPT" -r "$REL" --dir "$CLONE" \
         ${EXTRA[@]+"${EXTRA[@]}"} "$@" > "$LOG" 2>&1 || { cat "$LOG"; return 1; }
     cat "$LOG"
 }
@@ -49,7 +52,7 @@ run() {
 # Run fendl-get.sh expecting it to fail with a message matching a pattern.
 run_fails() {  # run_fails PATTERN ARGS...
     local pattern="$1"; shift
-    if "$BASH_BIN" "$SCRIPT" "$@" > "$LOG" 2>&1; then fail "accepted: $*"; fi
+    if "$BASH_BIN" "$SCRIPT" -r "$REL" "$@" > "$LOG" 2>&1; then fail "accepted: $*"; fi
     grep -q -- "$pattern" "$LOG" || fail "unexpected error message for: $*"
 }
 
@@ -101,10 +104,12 @@ snapshot() {
 snapshot > "$WORK/home-before"
 
 echo "=== 1. argument errors"
-if "$BASH_BIN" "$SCRIPT" -t bogus > "$LOG" 2>&1; then fail "invalid type accepted"; fi
+if "$BASH_BIN" "$SCRIPT" -r "$REL" -t bogus > "$LOG" 2>&1; then fail "invalid type accepted"; fi
 grep -q "unknown type 'bogus'" "$LOG" || fail "no error message for invalid type"
-"$BASH_BIN" "$SCRIPT" --help > "$LOG" 2>&1 || fail "--help failed"
+"$BASH_BIN" "$SCRIPT" -r "$REL" --help > "$LOG" 2>&1 || fail "--help failed"
 run_fails 'integer from 1 to 64' -t ace -j 0
+if "$BASH_BIN" "$SCRIPT" -t ace > "$LOG" 2>&1; then fail "missing --release accepted"; fi
+grep -q -- '--release is required' "$LOG" || fail "no error message for missing --release"
 run_fails 'integer from 1 to 64' -t ace -j 65
 pass "argument handling"
 
@@ -145,9 +150,9 @@ c=$(git -C "$CLONE" rev-parse --short=9 'FENDL-3.2c^{commit}')
 run -r "$c" -t ace -p p -m 01H_001 -n || fail "--release with a commit id failed"
 grep -q "Checking out $c" "$LOG" || fail "commit $c not checked out"
 run -r 'FENDL-3.2c~1' -t ace -p p -m 01H_001 -n || fail "--release FENDL-3.2c~1 failed"
-run -t ace -p n -m 01H_001 -n || fail "switching back to the default release failed"
-grep -q "Checking out fendl32d_prep" "$LOG" || fail "default release not checked out again"
-pass "paths, hdf5, photon alias, revisions as --release"
+run -r fendl32d_prep -t ace -p n -m 01H_001 -n || fail "--release with a branch name failed"
+grep -q "Checking out fendl32d_prep" "$LOG" || fail "branch fendl32d_prep not checked out"
+pass "paths, hdf5, photon alias, revisions (tag, branch, commit id) as --release"
 
 echo "=== 6. drop"
 run -t ace -p n -m '01H_001' --drop || fail "drop failed"
@@ -165,11 +170,11 @@ run_fails 'refusing to use it' --dir "$CLONE" --venv "$WORK/data" -t ace -p n -n
 # script is removed, and an existing empty directory is kept. (PYTHON=false
 # makes venv creation fail; the script may then fall back to a system
 # git-annex, so only the state of the directories is checked.)
-PYTHON=false "$BASH_BIN" "$SCRIPT" --dir "$CLONE" --venv "$WORK/newvenv" -t ace -p n -n > "$LOG" 2>&1 || true
+PYTHON=false "$BASH_BIN" "$SCRIPT" -r "$REL" --dir "$CLONE" --venv "$WORK/newvenv" -t ace -p n -n > "$LOG" 2>&1 || true
 grep -q 'could not create a venv' "$LOG" || fail "venv creation did not fail as intended"
 [ ! -e "$WORK/newvenv" ] || fail "venv directory created by the script not cleaned up"
 mkdir "$WORK/emptyvenv"
-PYTHON=false "$BASH_BIN" "$SCRIPT" --dir "$CLONE" --venv "$WORK/emptyvenv" -t ace -p n -n > "$LOG" 2>&1 || true
+PYTHON=false "$BASH_BIN" "$SCRIPT" -r "$REL" --dir "$CLONE" --venv "$WORK/emptyvenv" -t ace -p n -n > "$LOG" 2>&1 || true
 [ -d "$WORK/emptyvenv" ] || fail "existing (empty) --venv directory was removed"
 # --dir: another git repository is refused and left unchanged.
 git init -q "$WORK/project"
@@ -198,7 +203,7 @@ run_fails 'not set up by this script' --dir "$WORK/foreign" -t ace -p n -m 01H_0
 # ... while a plain git clone without git-annex state is used (and marked).
 git clone -q --no-checkout "$CLONE" "$WORK/plain"
 git -C "$WORK/plain" fetch -q "$CLONE" '+refs/remotes/origin/*:refs/remotes/origin/*'
-"$BASH_BIN" "$SCRIPT" --dir "$WORK/plain" --venv "$CLONE/.git/fendl-get-venv" \
+"$BASH_BIN" "$SCRIPT" -r "$REL" --dir "$WORK/plain" --venv "$CLONE/.git/fendl-get-venv" \
     ${EXTRA[@]+"${EXTRA[@]}"} -t ace -p n -m 01H_001 -n > "$LOG" 2>&1 || fail "plain git clone not accepted"
 [ "$(git -C "$WORK/plain" config --get fendl-get.managed)" = true ] || fail "plain git clone not marked"
 # --dir: a non-empty directory that is no repository is refused.

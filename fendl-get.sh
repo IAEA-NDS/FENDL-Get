@@ -20,7 +20,7 @@ set -euo pipefail
 
 REPO_URL="https://github.com/iaea-nds/fendl-processed"
 ENDF_SUBMODULE="fendl-endf"
-DEFAULT_RELEASE="fendl32d_prep"   # branch or tag checked out by default
+EXAMPLE_RELEASE="FENDL-3.2d-T4"   # used in messages only; --release is required
 
 # Public S3 special remotes holding the annexed content, as
 # "uuid|name|bucket|region". They are addressed by UUID because the remote
@@ -33,7 +33,7 @@ ALL_PARTICLES="neutron proton deuteron atom"
 
 # ---------------------------------------------------------------- defaults
 DIR="fendl-processed"
-RELEASE="$DEFAULT_RELEASE"   # 'latest' = newest FENDL-* tag
+RELEASE=""   # required; 'latest' = newest FENDL-* tag
 TYPES=""
 PARTICLES=""
 JOBS=4
@@ -69,7 +69,7 @@ die()  { printf '%s\n' "ERROR: $*" >&2; exit 1; }
 
 usage() {
     cat <<EOF
-Usage: $(basename "$0") [options] [PATH...]
+Usage: $(basename "$0") -r RELEASE [options] [PATH...]
 
 Download FENDL files (ACE, NJOY, MATXS, GENDF, plots, ENDF) via git-annex.
 
@@ -96,10 +96,11 @@ Selection:
                         e.g. general-purpose/neutron/ace/26Fe056
 
 Release and location:
-  -r, --release REF     FENDL release to check out: a git tag (e.g. FENDL-3.2c),
-                        a branch (e.g. fendl32d_prep), 'latest' for the newest
-                        FENDL-* tag, or any other git revision such as a full
-                        or abbreviated commit id. Default: $DEFAULT_RELEASE.
+  -r, --release REF     FENDL release to check out (required): a git tag
+                        (e.g. $EXAMPLE_RELEASE or FENDL-3.2c), a branch (e.g.
+                        fendl32d_prep), 'latest' for the newest FENDL-* tag, or
+                        any other git revision such as a full or abbreviated
+                        commit id.
       --list-releases   Show available releases and exit.
   -d, --dir DIR         Where to clone the repository (default: ./fendl-processed).
                         An existing clone made by this script (or a plain git
@@ -126,21 +127,21 @@ git-annex installation:
   -h, --help            Show this help.
 
 Examples:
-  # ACE files of the neutron sublibrary of the latest release
-  $(basename "$0") -t ace -p neutron
+  # ACE files of the neutron sublibrary of $EXAMPLE_RELEASE
+  $(basename "$0") -r $EXAMPLE_RELEASE -t ace -p neutron
 
   # ENDF and NJOY input files for iron isotopes (ENDF and processed files
   # use different naming schemes, hence two patterns)
-  $(basename "$0") -t endf,njoy-input -p n -m '*Fe-*' -m '26Fe*'
+  $(basename "$0") -r $EXAMPLE_RELEASE -t endf,njoy-input -p n -m '*Fe-*' -m '26Fe*'
 
   # ACE files of the FENDL-3.2b release
   $(basename "$0") -r FENDL-3.2b -t ace
 
   # How much would all proton and deuteron ACE files take?
-  $(basename "$0") -t ace -p p,d --dry-run
+  $(basename "$0") -r $EXAMPLE_RELEASE -t ace -p p,d --dry-run
 
   # Get neutron ACE files as plain files in ./ace-lib
-  $(basename "$0") -t ace -p n --copy-to ./ace-lib
+  $(basename "$0") -r $EXAMPLE_RELEASE -t ace -p n --copy-to ./ace-lib
 
 Everything this script creates (repository, venv with git-annex, downloaded
 files) is inside the clone directory, plus the --copy-to directory if given.
@@ -239,6 +240,9 @@ done
 if [ $LIST_RELEASES -eq 0 ] && [ -z "$sel_types" ] && [ ${#EXTRA_PATHS[@]} -eq 0 ]; then
     usage >&2
     die "nothing selected: use --type and/or give paths"
+fi
+if [ $LIST_RELEASES -eq 0 ] && [ -z "$RELEASE" ]; then
+    die "--release is required, e.g. -r $EXAMPLE_RELEASE (see --list-releases)"
 fi
 if [ -z "$sel_types" ] && { [ -n "$PARTICLES" ] || [ ${#MATCHES[@]} -gt 0 ]; }; then
     die "--particle/--match need --type"
@@ -422,7 +426,6 @@ latest_release() {
 }
 
 if [ $LIST_RELEASES -eq 1 ]; then
-    echo "Default: $DEFAULT_RELEASE"
     echo "Branches:"
     git for-each-ref --format='  %(refname:lstrip=3)' refs/remotes/origin/ |
         grep -v -e '^  HEAD$' -e 'git-annex$'
