@@ -153,8 +153,8 @@ c=$(git -C "$CLONE" rev-parse --short=9 'FENDL-3.2c^{commit}')
 run -r "$c" -t ace -p p -m 01H_001 -n || fail "--release with a commit id failed"
 grep -q "Checking out $c" "$LOG" || fail "commit $c not checked out"
 run -r 'FENDL-3.2c~1' -t ace -p p -m 01H_001 -n || fail "--release FENDL-3.2c~1 failed"
-run -r fendl32d_prep -t ace -p n -m 01H_001 -n || fail "--release with a branch name failed"
-grep -q "Checking out fendl32d_prep" "$LOG" || fail "branch fendl32d_prep not checked out"
+run -r main -t ace -p n -m 01H_001 -n || fail "--release with a branch name failed"
+grep -q "Checking out main" "$LOG" || fail "branch main not checked out"
 pass "paths, hdf5, photon alias, revisions (tag, branch, commit id) as --release"
 
 echo "=== 6. drop"

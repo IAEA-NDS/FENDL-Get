@@ -50,7 +50,7 @@
 
 .PARAMETER Release
     FENDL release to check out: a git tag (e.g. FENDL-3.2c), a branch
-    (e.g. fendl32d_prep), 'latest' for the newest FENDL-* tag, or any other
+    (e.g. main), 'latest' for the newest FENDL-* tag, or any other
     git revision such as a full or abbreviated commit id. Required (except
     with -ListReleases), e.g. FENDL-3.2d-T4. See -ListReleases for the
     available tags and branches.

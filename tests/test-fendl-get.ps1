@@ -214,8 +214,8 @@ foreach ($f in $Expected) { Test-Content $f }
 $c = ((& git -C $Clone rev-parse --short=9 'FENDL-3.2c^{commit}') -join '').Trim()
 if (-not (Invoke-FendlGet @('-Release', "$c~0", '-Type', 'ace', '-Particle', 'p', '-Match', '01H_001', '-DryRun'))) { Fail "-Release $c~0 failed" }
 Assert-Log ([regex]::Escape("Checking out $c~0")) "revision $c~0 not checked out"
-if (-not (Invoke-FendlGet (@('-Release', 'fendl32d_prep') + $Sel + '-DryRun'))) { Fail '-Release with a branch name failed' }
-Assert-Log 'Checking out fendl32d_prep' 'branch fendl32d_prep not checked out'
+if (-not (Invoke-FendlGet (@('-Release', 'main') + $Sel + '-DryRun'))) { Fail '-Release with a branch name failed' }
+Assert-Log 'Checking out main' 'branch main not checked out'
 Pass 'release switching (tag, branch, commit id)'
 
 Write-Host '=== 8. protection against wrong arguments'

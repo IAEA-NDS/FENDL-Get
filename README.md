@@ -98,7 +98,7 @@ Some examples:
 ```
 
 `-r` (`--release`) accepts a git tag such as `FENDL-3.2d-T4` or
-`FENDL-3.2c`, a branch such as `fendl32d_prep`, `latest` for the newest
+`FENDL-3.2c`, a branch such as `main`, `latest` for the newest
 `FENDL-*` tag, or any other git revision of [fendl-processed], e.g. a
 full or abbreviated commit id. The ENDF files are always taken from the
 [fendl-endf] commit that the selected fendl-processed commit refers to.

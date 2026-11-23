@@ -98,7 +98,7 @@ Selection:
 Release and location:
   -r, --release REF     FENDL release to check out (required): a git tag
                         (e.g. $EXAMPLE_RELEASE or FENDL-3.2c), a branch (e.g.
-                        fendl32d_prep), 'latest' for the newest FENDL-* tag, or
+                        main), 'latest' for the newest FENDL-* tag, or
                         any other git revision such as a full or abbreviated
                         commit id.
       --list-releases   Show available releases and exit.
