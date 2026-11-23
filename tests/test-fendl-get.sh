@@ -97,7 +97,10 @@ fendl-endf/general-purpose/neutron/n_0125_1-H-1.endf
 # Side effects outside the clone: entries in the home directory (3 levels,
 # e.g. ~/.cache/pip, ~/Library/Caches/...) and the global git config.
 snapshot() {
-    find "$HOME" -mindepth 1 -maxdepth 3 2>/dev/null | LC_ALL=C sort
+    # (~/Library/IdentityServices is changed by a macOS system service at
+    # random times, seen once in CI; nothing in fendl-get uses it.)
+    find "$HOME" -mindepth 1 -maxdepth 3 2>/dev/null |
+        grep -v "^$HOME/Library/IdentityServices\(/\|\$\)" | LC_ALL=C sort
     echo "--- global git config:"
     git config --global --list 2>/dev/null || true
 }
