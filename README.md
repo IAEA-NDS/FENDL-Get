@@ -236,3 +236,24 @@ the clone can be removed with the commands given above, and that
 nothing changed in the home directory and the global git config. They run in GitHub Actions on
 Linux, macOS and Windows for every push and weekly, to notice breakage
 caused by external changes (new git-annex releases, storage, GitHub).
+
+
+## License
+
+The scripts and tests in this repository are distributed under the MIT
+license augmented by an IAEA clause, see the accompanying
+[license file](LICENSE) for more information. This license does not
+apply to the nuclear data that the scripts download: for these, see
+`TERMS_OF_USE.md` in [fendl-processed].
+
+Copyright (c) 2026 International Atomic Energy Agency (IAEA)
+
+## Use of AI assistance
+
+The scripts, the tests, the GitHub Actions workflow and this README were
+written with substantial AI coding assistance (Claude Opus 5.5 by
+Anthropic, used through Claude Code). The maintainer specified the
+requirements, made the design decisions, directed the safety reviews
+and checked the results. The scripts are tested automatically on Linux,
+macOS and Windows (see [Development](#development)). Please report any
+problem as an issue in this repository.
