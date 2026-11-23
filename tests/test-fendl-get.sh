@@ -178,6 +178,29 @@ cfg_before=$(git -C "$WORK/project" config --local -l)
 run_fails 'not a clone of fendl-processed' --dir "$WORK/project" -t ace -p n -n
 [ ! -e "$WORK/project/.git/annex" ] || fail "git-annex was initialised in another repository"
 [ "$(git -C "$WORK/project" config --local -l)" = "$cfg_before" ] || fail "config of another repository changed"
+# GIT_DIR/GIT_WORK_TREE in the environment do not redirect the script to
+# another repository.
+head_before=$(git -C "$WORK/project" rev-parse HEAD)
+(export GIT_DIR="$WORK/project/.git" GIT_WORK_TREE="$WORK/project"
+ run -t ace -p n -m 01H_001 -n) || fail "run with GIT_DIR set failed"
+[ ! -e "$WORK/project/.git/annex" ] && [ ! -e "$WORK/project/.git/fendl-get-venv" ] ||
+    fail "GIT_DIR redirected the script to another repository"
+[ "$(git -C "$WORK/project" config --local -l)" = "$cfg_before" ] || fail "config of the GIT_DIR repository changed"
+[ "$(git -C "$WORK/project" rev-parse HEAD)" = "$head_before" ] || fail "HEAD of the GIT_DIR repository changed"
+# --dir: a clone set up with git-annex by someone else (e.g. a maintainer)
+# is refused and left unchanged ...
+git clone -q --no-checkout "$CLONE" "$WORK/foreign"
+git -C "$WORK/foreign" config annex.uuid 00000000-0000-0000-0000-000000000000
+cfg_before=$(git -C "$WORK/foreign" config --local -l)
+run_fails 'not set up by this script' --dir "$WORK/foreign" -t ace -p n -m 01H_001 -n
+[ "$(git -C "$WORK/foreign" config --local -l)" = "$cfg_before" ] || fail "config of a foreign clone changed"
+[ ! -e "$WORK/foreign/.git/annex" ] || fail "a foreign clone was modified"
+# ... while a plain git clone without git-annex state is used (and marked).
+git clone -q --no-checkout "$CLONE" "$WORK/plain"
+git -C "$WORK/plain" fetch -q "$CLONE" '+refs/remotes/origin/*:refs/remotes/origin/*'
+"$BASH_BIN" "$SCRIPT" --dir "$WORK/plain" --venv "$CLONE/.git/fendl-get-venv" \
+    ${EXTRA[@]+"${EXTRA[@]}"} -t ace -p n -m 01H_001 -n > "$LOG" 2>&1 || fail "plain git clone not accepted"
+[ "$(git -C "$WORK/plain" config --get fendl-get.managed)" = true ] || fail "plain git clone not marked"
 # --dir: a non-empty directory that is no repository is refused.
 run_fails 'exists and is not a git repository' --dir "$WORK/data" -t ace -p n -n
 # --copy-to: directories inside the clone are refused.

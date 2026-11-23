@@ -227,6 +227,36 @@ $cfgBefore = (& git -C $project config --local -l) -join "`n"
 Assert-Fails 'not a clone of fendl-processed' @('-Dir', $project, '-Type', 'ace', '-Particle', 'n', '-DryRun')
 if (Test-Path (Join-Path $project '.git/annex')) { Fail 'git-annex was initialised in another repository' }
 if (((& git -C $project config --local -l) -join "`n") -ne $cfgBefore) { Fail 'config of another repository changed' }
+# GIT_DIR/GIT_WORK_TREE in the environment do not redirect the script to
+# another repository.
+$headBefore = (& git -C $project rev-parse HEAD)
+$env:GIT_DIR = Join-Path $project '.git'; $env:GIT_WORK_TREE = $project
+try { $ok = Invoke-FendlGet @('-Type', 'ace', '-Particle', 'n', '-Match', '01H_001', '-DryRun') }
+finally { Remove-Item Env:GIT_DIR, Env:GIT_WORK_TREE }
+if (-not $ok) { Fail 'run with GIT_DIR set failed' }
+if ((Test-Path (Join-Path $project '.git/annex')) -or (Test-Path (Join-Path $project '.git/fendl-get-venv'))) {
+    Fail 'GIT_DIR redirected the script to another repository'
+}
+if (((& git -C $project config --local -l) -join "`n") -ne $cfgBefore) { Fail 'config of the GIT_DIR repository changed' }
+if ((& git -C $project rev-parse HEAD) -ne $headBefore) { Fail 'HEAD of the GIT_DIR repository changed' }
+# -Dir: a clone set up with git-annex by someone else (e.g. a maintainer) is
+# refused and left unchanged ...
+$foreign = Join-Path $Work 'foreign'
+& git clone -q --no-checkout $Clone $foreign
+& git -C $foreign config annex.uuid 00000000-0000-0000-0000-000000000000
+$cfgBefore = (& git -C $foreign config --local -l) -join "`n"
+Assert-Fails 'not set up by this script' @('-Dir', $foreign, '-Type', 'ace', '-Particle', 'n', '-Match', '01H_001', '-DryRun')
+if (((& git -C $foreign config --local -l) -join "`n") -ne $cfgBefore) { Fail 'config of a foreign clone changed' }
+if (Test-Path (Join-Path $foreign '.git/annex')) { Fail 'a foreign clone was modified' }
+# ... while a plain git clone without git-annex state is used (and marked).
+$plain = Join-Path $Work 'plain'
+& git clone -q --no-checkout $Clone $plain
+& git -C $plain fetch -q $Clone '+refs/remotes/origin/*:refs/remotes/origin/*'
+if (-not (Invoke-FendlGet (@('-Dir', $plain, '-Venv', $VenvDir) + $Extra +
+        @('-Type', 'ace', '-Particle', 'n', '-Match', '01H_001', '-DryRun')) -NoDefaults)) {
+    Fail 'plain git clone not accepted'
+}
+if ((& git -C $plain config --get fendl-get.managed) -ne 'true') { Fail 'plain git clone not marked' }
 # -Dir: a non-empty directory that is no repository is refused.
 Assert-Fails 'exists and is not a git repository' @('-Dir', $data, '-Type', 'ace', '-Particle', 'n', '-DryRun')
 # -CopyTo: directories inside the clone are refused.

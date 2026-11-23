@@ -56,8 +56,9 @@
 
 .PARAMETER Dir
     Where to clone the repository (default: .\fendl-processed). An existing
-    clone of fendl-processed is reused; any other existing, non-empty
-    directory is refused.
+    clone made by this script (or a plain git clone of fendl-processed) is
+    reused; any other existing, non-empty directory is refused, including
+    clones set up with git-annex by someone else.
 
 .PARAMETER Update
     Fetch the newest commits/tags of an existing clone.
@@ -343,6 +344,11 @@ foreach ($x in $Path) {
 if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
     Fail 'git is not installed (Windows: https://git-scm.com/download/win)'
 }
+# Variables such as GIT_DIR or GIT_WORK_TREE (e.g. from a dotfiles setup)
+# would redirect the git commands below to another repository; ignore them.
+foreach ($v in (Get-GitOutput @('rev-parse', '--local-env-vars'))) {
+    Remove-Item -Path "Env:$v" -ErrorAction SilentlyContinue
+}
 
 function Show-AnnexHint {
     Write-Host @'
@@ -443,6 +449,27 @@ function Assert-CloneOf([string]$Repo, [string]$RootCommit, [string]$What) {
     }
 }
 
+# Clones set up by this script are marked with this local git config setting.
+$OwnerKey = 'fendl-get.managed'
+
+# Whether $Repo was set up by this script (also by earlier versions, which
+# marked its S3 remote), or has no git-annex state yet.
+function Test-Ours([string]$Repo, [hashtable]$R) {
+    if ((Get-GitConfig $Repo $OwnerKey) -eq 'true') { return $true }
+    if ((Get-GitConfig $Repo "remote.$($R.Name).fendl-get-public") -eq 'true') { return $true }
+    if (Get-GitConfig $Repo 'annex.uuid') { return $false }
+    $gd = Get-GitOutput @('-C', $Repo, 'rev-parse', '--absolute-git-dir')
+    return -not ($gd.Count -gt 0 -and (Test-Path -LiteralPath (Join-Path ([string]$gd[0]) 'annex')))
+}
+
+# Never modify a clone that someone set up with git-annex themselves (e.g. a
+# maintainer's clone with S3 credentials and its own settings).
+function Assert-Ours([string]$Repo, [hashtable]$R) {
+    if (-not (Test-Ours $Repo $R)) {
+        Fail "$Repo is a git-annex repository that was not set up by this script; to protect its settings and stored credentials it is not modified (choose another -Dir, or use git annex get in it directly)"
+    }
+}
+
 # Copies inside the clone would end up as stray files in the repository.
 if ($CopyTo) {
     $cmp = if ($OnWindows) { [System.StringComparison]::OrdinalIgnoreCase } else { [System.StringComparison]::Ordinal }
@@ -454,6 +481,7 @@ if ($CopyTo) {
 
 if (Test-GitRepo $Root) {
     Assert-CloneOf $Root $RootCommitMain 'fendl-processed'
+    Assert-Ours $Root $S3Main
     Write-Msg "Using existing clone in $Root"
     if ($Update) {
         Write-Msg 'Fetching updates'
@@ -466,6 +494,8 @@ if (Test-GitRepo $Root) {
     if (-not (Invoke-Git @('-c', 'core.longpaths=true', 'clone', '--quiet', '--no-checkout', $RepoUrl, $Root))) {
         Fail 'git clone failed'
     }
+    Assert-CloneOf $Root $RootCommitMain 'fendl-processed'
+    Invoke-GitQuiet @('-C', $Root, 'config', $OwnerKey, 'true') | Out-Null
 }
 # Annexed object paths are long; avoid the 260 character limit on Windows.
 Invoke-GitQuiet @('-C', $Root, 'config', 'core.longpaths', 'true') | Out-Null
@@ -545,6 +575,7 @@ function Initialize-Annex([string]$Repo) {
         Invoke-GitQuiet @('-C', $Repo, 'config', 'user.name', 'fendl-get') | Out-Null
         Invoke-GitQuiet @('-C', $Repo, 'config', 'user.email', 'fendl-get@localhost') | Out-Null
     }
+    Invoke-GitQuiet @('-C', $Repo, 'config', $OwnerKey, 'true') | Out-Null   # (see Assert-Ours)
     if (-not (Get-GitConfig $Repo 'annex.uuid')) {
         # GitHub cannot serve annexed content; skip probing origin for it.
         Invoke-GitQuiet @('-C', $Repo, 'config', 'remote.origin.annex-ignore', 'true') | Out-Null
@@ -649,7 +680,10 @@ if ($needEndf -or (Test-GitRepo $EndfRoot)) {
     $endfCommit = Get-GitOutput @('-C', $Root, 'rev-parse', "HEAD:$EndfSubdir")
     if ($endfCommit.Count -eq 0) { Fail "$EndfSubdir is not part of release $Release" }
     $endfCommit = [string]$endfCommit[0]
-    if (Test-GitRepo $EndfRoot) { Assert-CloneOf $EndfRoot $RootCommitEndf 'fendl-endf' }
+    if (Test-GitRepo $EndfRoot) {
+        Assert-CloneOf $EndfRoot $RootCommitEndf 'fendl-endf'
+        Assert-Ours $EndfRoot $S3Endf
+    }
     if (-not (Test-GitRepo $EndfRoot)) {
         $endfUrl = Get-GitOutput @('-C', $Root, 'config', '-f', '.gitmodules', "submodule.$EndfSubdir.url")
         if ($endfUrl.Count -eq 0) { Fail "no URL for $EndfSubdir in .gitmodules" }
@@ -660,6 +694,7 @@ if ($needEndf -or (Test-GitRepo $EndfRoot)) {
         if (-not (Invoke-Git @('-c', 'core.longpaths=true', 'clone', '--quiet', '--no-checkout', [string]$endfUrl[0], $EndfRoot))) {
             Fail "git clone of $EndfSubdir failed"
         }
+        Invoke-GitQuiet @('-C', $EndfRoot, 'config', $OwnerKey, 'true') | Out-Null
         Invoke-GitQuiet @('-C', $EndfRoot, 'config', 'core.longpaths', 'true') | Out-Null
         if ($OnWindows) { Invoke-GitQuiet @('-C', $EndfRoot, 'config', 'core.symlinks', 'false') | Out-Null }
     }

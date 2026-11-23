@@ -102,8 +102,10 @@ Release and location:
                         or abbreviated commit id. Default: $DEFAULT_RELEASE.
       --list-releases   Show available releases and exit.
   -d, --dir DIR         Where to clone the repository (default: ./fendl-processed).
-                        An existing clone of fendl-processed is reused; any
-                        other existing, non-empty directory is refused.
+                        An existing clone made by this script (or a plain git
+                        clone of fendl-processed) is reused; any other
+                        existing, non-empty directory is refused, including
+                        clones set up with git-annex by someone else.
   -u, --update          Fetch the newest commits/tags of an existing clone.
 
 Actions:
@@ -282,6 +284,9 @@ done
 
 # ---------------------------------------------------------------- git-annex
 command -v git >/dev/null 2>&1 || die "git is not installed"
+# Variables such as GIT_DIR or GIT_WORK_TREE (e.g. from a dotfiles setup)
+# would redirect the git commands below to another repository; ignore them.
+for v in $(git rev-parse --local-env-vars); do unset "$v"; done
 ORIG_PATH="$PATH"
 
 annex_hint() {
@@ -360,12 +365,33 @@ setup_venv() {
 
 
 # ---------------------------------------------------------------- repository
+# Clones set up by this script are marked with this local git config setting.
+OWNER_KEY="fendl-get.managed"
+
+# is_ours REPO REMOTE_SPEC: whether REPO was set up by this script (also by
+# earlier versions, which marked its S3 remote), or has no git-annex state yet.
+is_ours() {
+    local name=${2#*|}; name=${name%%|*}
+    [ "$(git -C "$1" config --get "$OWNER_KEY" 2>/dev/null)" = true ] && return 0
+    [ "$(git -C "$1" config --get "remote.$name.fendl-get-public" 2>/dev/null)" = true ] && return 0
+    [ -z "$(git -C "$1" config --get annex.uuid 2>/dev/null)" ] &&
+        [ ! -e "$(git -C "$1" rev-parse --absolute-git-dir)/annex" ]
+}
+
+# Never modify a clone that someone set up with git-annex themselves (e.g. a
+# maintainer's clone with S3 credentials and its own settings).
+assert_ours() {  # assert_ours REPO REMOTE_SPEC
+    is_ours "$1" "$2" ||
+        die "$1 is a git-annex repository that was not set up by this script; to protect its settings and stored credentials it is not modified (choose another --dir, or use git annex get in it directly)"
+}
+
 if [ -d "$DIR/.git" ] || [ -f "$DIR/.git" ]; then
     git -C "$DIR" rev-parse --git-dir >/dev/null 2>&1 || die "$DIR is not a valid git repository"
     # Never modify a repository that is not a clone of fendl-processed
     # (e.g. a project of the user given by mistake as --dir).
     git -C "$DIR" cat-file -e "$ROOT_COMMIT_MAIN^{commit}" 2>/dev/null ||
         die "$DIR is a git repository, but not a clone of fendl-processed; refusing to modify it (choose another --dir)"
+    assert_ours "$DIR" "$S3_REMOTE_MAIN"
     msg "Using existing clone in $DIR"
     if [ $UPDATE -eq 1 ]; then
         msg "Fetching updates"
@@ -376,6 +402,9 @@ elif [ -e "$DIR" ] && [ -n "$(ls -A "$DIR" 2>/dev/null)" ]; then
 else
     msg "Cloning $REPO_URL into $DIR"
     git clone --quiet "$REPO_URL" "$DIR"
+    git -C "$DIR" cat-file -e "$ROOT_COMMIT_MAIN^{commit}" 2>/dev/null ||
+        die "$REPO_URL did not provide a clone of fendl-processed"
+    git -C "$DIR" config "$OWNER_KEY" true
 fi
 cd "$DIR"
 ROOT=$(pwd -P)
@@ -437,10 +466,11 @@ if ! commit=$(resolve_ref "$RELEASE"); then
         die "unknown release '$RELEASE' (see --list-releases)"
 fi
 
-if [ "$(git rev-parse HEAD)" != "$commit" ]; then
+# (No index: a clone made with --no-checkout, whose files are not checked out.)
+if [ "$(git rev-parse HEAD)" != "$commit" ] || [ ! -f "$(git rev-parse --git-path index)" ]; then
     # Refuse to switch if tracked files were modified (annexed files that were
     # downloaded are *not* modifications; they live in .git/annex).
-    if ! git diff --quiet HEAD -- 2>/dev/null; then
+    if [ -f "$(git rev-parse --git-path index)" ] && ! git diff --quiet HEAD -- 2>/dev/null; then
         die "the clone in $DIR has local modifications; cannot switch to $RELEASE"
     fi
     msg "Checking out $RELEASE"
@@ -459,6 +489,7 @@ annex_init() {  # annex_init: initialise git-annex in the current repo once
         git config user.name "fendl-get"
         git config user.email "fendl-get@localhost"
     fi
+    git config "$OWNER_KEY" true   # (see assert_ours)
     if [ -z "$(git config --get annex.uuid 2>/dev/null || true)" ]; then
         # GitHub cannot serve annexed content; skip probing origin for it.
         git config remote.origin.annex-ignore true
@@ -513,6 +544,11 @@ enable_s3_remote "$S3_REMOTE_MAIN"
 
 ENDF_ROOT="$ROOT/$ENDF_SUBMODULE"
 if [ $need_endf -eq 1 ] || [ -e "$ENDF_ROOT/.git" ]; then
+    if [ -e "$ENDF_ROOT/.git" ]; then
+        git -C "$ENDF_ROOT" cat-file -e "$ROOT_COMMIT_ENDF^{commit}" 2>/dev/null ||
+            die "$ENDF_ROOT is not a clone of fendl-endf; refusing to modify it"
+        assert_ours "$ENDF_ROOT" "$S3_REMOTE_ENDF"
+    fi
     # Keep the submodule at the commit recorded for this release.
     [ -e "$ENDF_ROOT/.git" ] || msg "Fetching the $ENDF_SUBMODULE submodule (ENDF files)"
     git -c advice.detachedHead=false submodule --quiet update --init -- "$ENDF_SUBMODULE"

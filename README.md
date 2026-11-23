@@ -125,6 +125,12 @@ A few things to keep in mind:
 - AWS credentials in your environment (`AWS_ACCESS_KEY_ID` etc.) are
   ignored: the files are public, and git-annex would otherwise use the
   credentials and store them in the clone.
+- An existing folder given as `--dir` is only used if it is a clone made
+  by the script, or a plain `git clone` of fendl-processed. Clones that
+  someone set up with git-annex themselves (e.g. a maintainer's clone
+  with S3 credentials) are left alone; use `git annex get` in them
+  directly. Git environment variables such as `GIT_DIR` are ignored, so
+  that the script cannot act on another repository by mistake.
 - If a run is interrupted (e.g. with Ctrl-C), simply run the same
   command again; it continues where it stopped.
 - The `git-annex` package on PyPI provides binaries for Linux with
@@ -221,8 +227,9 @@ pwsh ./tests/test-fendl-get.ps1                # PowerShell script
 $env:TEST_SHELL = 'powershell'; ./tests/test-fendl-get.ps1   # Windows PowerShell 5.1
 ```
 The tests need network access. They also check that wrong arguments
-(e.g. an unrelated repository as `--dir`, a non-empty folder as `--venv`)
-are refused without changing anything, that AWS credentials in the
+(e.g. an unrelated repository or a git-annex clone set up by someone else
+as `--dir`, a non-empty folder as `--venv`) are refused without changing
+anything, that `GIT_DIR` in the environment does not redirect the script, that AWS credentials in the
 environment are ignored, that an interrupted venv installation is
 repaired, that downloads which do not fit on the disk are refused, that
 the clone can be removed with the commands given above, and that
